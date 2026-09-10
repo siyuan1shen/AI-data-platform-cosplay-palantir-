@@ -1,0 +1,63 @@
+# syntax=docker/dockerfile:1.7
+
+FROM node:24-bookworm-slim AS frontend-builder
+
+WORKDIR /build/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY contracts /build/contracts
+COPY frontend ./
+RUN npm run build
+
+
+FROM python:3.12-slim-bookworm AS backend-builder
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /build/backend
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+COPY backend/pyproject.toml ./
+COPY backend/src ./src
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && python -m pip install ".[postgresql]"
+
+
+FROM python:3.12-slim-bookworm AS runtime
+
+ARG APP_UID=10001
+ARG APP_GID=10001
+ARG BUILD_ID=container
+
+ENV PATH="/opt/venv/bin:${PATH}" \
+    PYTHONPATH="/app/backend/src" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    EI_BACKEND_DATA_DIR=/app/data \
+    EI_BACKEND_FRONTEND_DIST_DIR=/app/frontend
+
+RUN groupadd --gid "${APP_GID}" app \
+    && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home \
+        --home-dir /home/app --shell /usr/sbin/nologin app \
+    && mkdir -p /app/data /app/backend /app/frontend \
+    && chown -R "${APP_UID}:${APP_GID}" /app /home/app \
+    && chmod 0750 /app/data
+
+ENV EI_BACKEND_BUILD_ID=${BUILD_ID}
+WORKDIR /app
+
+COPY --from=backend-builder /opt/venv /opt/venv
+COPY --from=backend-builder --chown=${APP_UID}:${APP_GID} /build/backend/src /app/backend/src
+COPY --from=frontend-builder --chown=${APP_UID}:${APP_GID} /build/frontend/dist /app/frontend
+
+USER 10001:10001
+
+VOLUME ["/app/data"]
+EXPOSE 8012
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8012/api/v3/health', timeout=3).read()"]
+
+CMD ["python", "-m", "uvicorn", "enterprise_insight_backend.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8012"]

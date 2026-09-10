@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ei_acceptance
+          POSTGRES_USER: ei_test
+          POSTGRES_PASSWORD: disposable-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ei_test -d ei_acceptance"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install backend
+        run: python -m pip install -e "./backend[dev,postgresql]"
+      - name: Lint backend
+        run: ruff check backend/src backend/tests
+      - name: Test backend
+        run: pytest backend/tests
+        env:
+          EI_TEST_POSTGRES_DSN: postgresql://ei_test:disposable-ci-only@127.0.0.1:5432/ei_acceptance
+      - name: Export OpenAPI
+        run: python backend/scripts/export_openapi.py
+      - name: Install frontend
+        run: npm ci --prefix frontend
+      - name: Test frontend
+        run: npm test --prefix frontend
+      - name: Build frontend
+        run: npm run build --prefix frontend
+      - name: Verify generated contracts are committed
+        run: git diff --exit-code -- contracts/openapi.json frontend/src/api/schema.d.ts
+      - name: Build V3 container
+        run: docker build --file Dockerfile.v3 --tag enterprise-insight-v3:ci .
+      - name: Smoke test V3 container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name ei-v3-smoke --read-only --tmpfs /tmp \
+            --publish 127.0.0.1:18012:8012 enterprise-insight-v3:ci
+          trap 'docker logs ei-v3-smoke; docker rm --force --volumes ei-v3-smoke' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18012/api/v3/health > /tmp/ei-health.json; then
+              break
+            fi
+            sleep 2
+          done
+          python -c "import json; h=json.load(open('/tmp/ei-health.json')); assert h['database']=='ready' and h['frontend']=='ready', h"
+          curl --fail --silent http://127.0.0.1:18012/developer/ | grep -q 'id="root"'
+          curl --fail --silent http://127.0.0.1:18012/executive/ | grep -q 'id="root"'
