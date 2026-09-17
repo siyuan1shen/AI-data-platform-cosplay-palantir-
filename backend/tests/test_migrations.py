@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from alembic import command
@@ -12,7 +13,38 @@ from sqlalchemy import Integer, MetaData, inspect, select, text
 from enterprise_insight_backend.config import Settings
 from enterprise_insight_backend.database import Database
 from enterprise_insight_backend.migration import DATABASE_SCHEMA_REVISION, _config
-from enterprise_insight_backend.models import Base, CompanyRow, ProjectRow
+from enterprise_insight_backend.models import Base, CompanyRow
+
+
+def _legacy_company(database: Database, name: str) -> str:
+    """Insert a company using only columns present in pre-scope revisions."""
+    company_id = str(uuid4())
+    with database.engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO companies "
+                "(id, name, industry, description, created_at, updated_at) "
+                "VALUES (:id, :name, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"id": company_id, "name": name},
+        )
+    return company_id
+
+
+def _legacy_project(database: Database, company_id: str, name: str) -> str:
+    """Insert a project using only columns present before projection scoping."""
+    project_id = str(uuid4())
+    with database.engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO projects "
+                "(id, company_id, name, description, status, revision, created_at, updated_at) "
+                "VALUES (:id, :company_id, :name, NULL, 'ACTIVE', 0, "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"id": project_id, "company_id": company_id, "name": name},
+        )
+    return project_id
 
 
 @pytest.mark.parametrize(
@@ -27,8 +59,10 @@ def test_every_historical_revision_upgrades_and_preserves_company(
     with database.engine.begin() as connection:
         config.attributes["connection"] = connection
         command.upgrade(config, revision)
-    with database.session_factory.begin() as session:
-        session.add(CompanyRow(name=f"升级前企业-{revision}"))
+    # CompanyRow represents the current schema and may contain fields added by
+    # later migrations. Insert only columns guaranteed by this historical
+    # revision, then let create_schema upgrade the database.
+    _legacy_company(database, f"升级前企业-{revision}")
     database.create_schema()
     backups = list((tmp_path / "schema-backups").glob("*.db"))
     assert len(backups) == (0 if revision == DATABASE_SCHEMA_REVISION else 1)
@@ -55,15 +89,8 @@ def test_management_action_upgrade_adds_idempotency_without_losing_history(
     with database.engine.begin() as connection:
         config.attributes["connection"] = connection
         command.upgrade(config, "f6a8c2d4019b")
-    with database.session_factory.begin() as session:
-        company = CompanyRow(name="管理行动升级保留企业")
-        session.add(company)
-        session.flush()
-        project = ProjectRow(company_id=company.id, name="保留行动历史")
-        session.add(project)
-        session.flush()
-        company_id = company.id
-        project_id = project.id
+    company_id = _legacy_company(database, "管理行动升级保留企业")
+    project_id = _legacy_project(database, company_id, "保留行动历史")
 
     timestamp = datetime.now(UTC).isoformat()
     with database.engine.begin() as connection:
@@ -133,14 +160,8 @@ def test_source_secret_migration_adds_ciphertext_column_without_needing_a_key(
     with database.engine.begin() as connection:
         config.attributes["connection"] = connection
         command.upgrade(config, "b7296f0c31ad")
-    with database.session_factory.begin() as session:
-        company = CompanyRow(name="数据源凭据迁移")
-        session.add(company)
-        session.flush()
-        project = ProjectRow(company_id=company.id, name="旧连接配置")
-        session.add(project)
-        session.flush()
-        project_id = project.id
+    company_id = _legacy_company(database, "数据源凭据迁移")
+    project_id = _legacy_project(database, company_id, "旧连接配置")
 
     legacy_profile = {
         "base_url": "https://erp.invalid",
@@ -204,8 +225,7 @@ def test_failed_upgrade_retains_a_readable_pre_upgrade_backup(tmp_path: Path, mo
     with database.engine.begin() as connection:
         config.attributes["connection"] = connection
         command.upgrade(config, "74cf2e16a0c8")
-    with database.session_factory.begin() as session:
-        session.add(CompanyRow(name="升级失败仍可恢复"))
+    _legacy_company(database, "升级失败仍可恢复")
 
     def fail_upgrade(config, revision):
         connection = config.attributes["connection"]
@@ -241,14 +261,8 @@ def test_metric_upgrade_preserves_child_observations_and_versions(tmp_path: Path
     with database.engine.begin() as connection:
         config.attributes["connection"] = connection
         command.upgrade(config, "8c4e1a6d9b20")
-    with database.session_factory.begin() as session:
-        company = CompanyRow(name="指标迁移企业")
-        session.add(company)
-        session.flush()
-        project = ProjectRow(company_id=company.id, name="历史经营指标")
-        session.add(project)
-        session.flush()
-        project_id = project.id
+    company_id = _legacy_company(database, "指标迁移企业")
+    project_id = _legacy_project(database, company_id, "历史经营指标")
     metadata = MetaData()
     metadata.reflect(database.engine)
     timestamp = datetime.now(UTC)

@@ -154,6 +154,7 @@ class ObservationDatabase:
             {"check_same_thread": False, "timeout": 30} if url.startswith("sqlite") else {}
         )
         self.engine: Engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
+        self.shared_storage = settings.unified_storage and url == settings.resolved_database_url
         if url.startswith("sqlite"):
             event.listen(self.engine, "connect", _enable_sqlite_foreign_keys)
         self.session_factory = sessionmaker(
@@ -168,24 +169,30 @@ class ObservationDatabase:
         from enterprise_insight_backend.virtual_work import Base as VirtualWorkBase
 
         with self.engine.begin() as connection:
-            # PRAGMA user_version is database-global and cannot be used when
-            # observation tables share the platform database with formal data.
-            # A domain-local marker keeps each logical schema independently
-            # upgradeable while preserving one physical SQLite file.
-            connection.exec_driver_sql(
-                "CREATE TABLE IF NOT EXISTS observation_schema "
-                "(id INTEGER PRIMARY KEY, version INTEGER NOT NULL)"
-            )
-            version = connection.exec_driver_sql(
-                "SELECT version FROM observation_schema WHERE id = 1"
-            ).scalar_one_or_none()
-            if version is not None and int(version) > 4:
-                raise RuntimeError(f"Unsupported observation database revision: {version}")
+            if self.shared_storage:
+                # PRAGMA user_version is database-global when all domains share
+                # one SQLite file, so use a domain-local marker in that mode.
+                connection.exec_driver_sql(
+                    "CREATE TABLE IF NOT EXISTS observation_schema "
+                    "(id INTEGER PRIMARY KEY, version INTEGER NOT NULL)"
+                )
+                version = connection.exec_driver_sql(
+                    "SELECT version FROM observation_schema WHERE id = 1"
+                ).scalar_one_or_none()
+                if version is not None and int(version) > 4:
+                    raise RuntimeError(f"Unsupported observation database revision: {version}")
+            else:
+                version = connection.exec_driver_sql("PRAGMA user_version").scalar_one()
+                if int(version) > 4:
+                    raise RuntimeError(f"Unsupported observation database revision: {version}")
             VirtualWorkBase.metadata.create_all(connection)
-            connection.exec_driver_sql(
-                "INSERT INTO observation_schema(id, version) VALUES (1, 4) "
-                "ON CONFLICT(id) DO UPDATE SET version = excluded.version"
-            )
+            if self.shared_storage:
+                connection.exec_driver_sql(
+                    "INSERT INTO observation_schema(id, version) VALUES (1, 4) "
+                    "ON CONFLICT(id) DO UPDATE SET version = excluded.version"
+                )
+            else:
+                connection.exec_driver_sql("PRAGMA user_version=4")
 
     def session_dependency(self) -> Generator[Session, None, None]:
         with self.session_factory() as session:

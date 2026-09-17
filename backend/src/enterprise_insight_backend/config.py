@@ -23,10 +23,10 @@ class Settings(BaseSettings):
         default_factory=lambda: Path(__file__).resolve().parents[3] / "frontend" / "dist"
     )
     database_url: str | None = None
-    # The platform now uses one physical database by default.  The explicit
-    # per-domain URLs remain as a compatibility escape hatch for restoring an
-    # old installation or running an isolated migration test.
-    unified_storage: bool = True
+    # Keep the formal, observation, potential and control domains physically
+    # separate by default. A single-file deployment remains available as an
+    # explicit opt-in for constrained local installations.
+    unified_storage: bool = False
     observation_database_url: str | None = None
     potential_database_url: str | None = None
     control_database_url: str | None = None

@@ -327,7 +327,7 @@ class PotentialAuditRow(PotentialBase):
 class PotentialDatabase:
     """A physically separate SQLite store. Scope rows contain IDs only, not formal data."""
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, shared_storage: bool = False) -> None:
         if database_url == ":memory:":
             database_url = "sqlite:///:memory:"
         try:
@@ -338,6 +338,7 @@ class PotentialDatabase:
             raise ValueError("潜在库切片目前只支持独立 SQLite 数据库。")
 
         self.database_url = database_url
+        self.shared_storage = shared_storage
         is_memory = parsed_url.database in (None, "", ":memory:")
         engine_options: dict[str, Any] = {
             "connect_args": {"check_same_thread": False, "timeout": 30},
@@ -353,18 +354,22 @@ class PotentialDatabase:
 
     def create_schema(self) -> None:
         with self.engine.begin() as connection:
-            # PRAGMA user_version belongs to the whole SQLite file.  Use a
-            # domain-local marker so the potential library can live beside
-            # formal, observation and control tables in one database.
-            connection.exec_driver_sql(
-                "CREATE TABLE IF NOT EXISTS potential_schema "
-                "(id INTEGER PRIMARY KEY, version INTEGER NOT NULL)"
-            )
-            version = connection.exec_driver_sql(
-                "SELECT version FROM potential_schema WHERE id = 1"
-            ).scalar_one_or_none()
-            if version is not None and int(version) > 2:
-                raise RuntimeError(f"Unsupported potential database revision: {version}")
+            if self.shared_storage:
+                # A shared SQLite file needs a domain-local marker because its
+                # global PRAGMA user_version belongs to the formal schema.
+                connection.exec_driver_sql(
+                    "CREATE TABLE IF NOT EXISTS potential_schema "
+                    "(id INTEGER PRIMARY KEY, version INTEGER NOT NULL)"
+                )
+                version = connection.exec_driver_sql(
+                    "SELECT version FROM potential_schema WHERE id = 1"
+                ).scalar_one_or_none()
+                if version is not None and int(version) > 2:
+                    raise RuntimeError(f"Unsupported potential database revision: {version}")
+            else:
+                version = connection.exec_driver_sql("PRAGMA user_version").scalar_one()
+                if int(version) > 2:
+                    raise RuntimeError(f"Unsupported potential database revision: {version}")
             PotentialBase.metadata.create_all(connection)
             columns = {
                 row[1] for row in connection.exec_driver_sql("PRAGMA table_info(potential_records)")
@@ -377,10 +382,13 @@ class PotentialDatabase:
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_potential_project_idempotency "
                 "ON potential_records(company_id, project_id, idempotency_key)"
             )
-            connection.exec_driver_sql(
-                "INSERT INTO potential_schema(id, version) VALUES (1, 2) "
-                "ON CONFLICT(id) DO UPDATE SET version = excluded.version"
-            )
+            if self.shared_storage:
+                connection.exec_driver_sql(
+                    "INSERT INTO potential_schema(id, version) VALUES (1, 2) "
+                    "ON CONFLICT(id) DO UPDATE SET version = excluded.version"
+                )
+            else:
+                connection.exec_driver_sql("PRAGMA user_version=2")
 
     def dispose(self) -> None:
         self.engine.dispose()

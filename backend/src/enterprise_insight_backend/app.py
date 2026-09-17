@@ -39,7 +39,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or get_settings()
     database = Database(resolved)
     observation_database = ObservationDatabase(resolved)
-    potential_database = PotentialDatabase(resolved.resolved_potential_database_url)
+    potential_database = PotentialDatabase(
+        resolved.resolved_potential_database_url,
+        shared_storage=resolved.unified_storage,
+    )
     control_database = ControlDatabase(resolved.resolved_control_database_url)
     backup_service = MultiStoreBackupService(
         {
