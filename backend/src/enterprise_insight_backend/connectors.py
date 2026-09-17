@@ -628,7 +628,11 @@ def connector_for(kind: str, profile: dict[str, Any]) -> ReadOnlyConnector:
         return SQLiteConnector(profile)
     if kind == "POSTGRESQL":
         return PostgreSQLConnector(profile)
-    if kind in {"REST", "ERP", "MES", "CRM"}:
+    if kind == "ERP":
+        from enterprise_insight_backend.erpnext_connector import ERPNextConnector
+
+        return ERPNextConnector(profile)
+    if kind in {"REST", "MES", "CRM"}:
         return RESTJSONConnector(profile)
     raise DomainError(
         "CONNECTOR_UNAVAILABLE",

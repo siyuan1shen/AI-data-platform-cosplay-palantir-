@@ -1,0 +1,12 @@
+{
+  "source_id": "hp-test-device",
+  "employee_key": "self-test-001",
+  "project_id": "1b671a76-e61c-43a9-9cbe-b6462a4b3b5d",
+  "role_key": "test-role",
+  "upload_url": "http://127.0.0.1:8012/api/v3/ingestion/work-observation/batches",
+  "cache_dir": "C:/Users/HP/AppData/Local/EnterpriseInsight/employee-collector-cache",
+  "poll_seconds": 5,
+  "idle_after_seconds": 300,
+  "retry_seconds": 30,
+  "headers": {}
+}

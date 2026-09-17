@@ -507,6 +507,7 @@ class ProjectionService:
             include_retired=query.include_retired,
             include_unmodeled=query.include_unmodeled,
             include_observations=query.include_observations,
+            limit=(query.entity_limit if neighborhood_entity_ids is None else None),
         )
         relations = self.list_relations(
             project_id,
@@ -518,6 +519,7 @@ class ProjectionService:
                 else None
             ),
             include_retired=query.include_retired,
+            limit=(query.relation_limit if neighborhood_relation_ids is None else None),
         )
         if query.scenario_id is not None:
             entities, relations = self._apply_scenario(
@@ -566,6 +568,26 @@ class ProjectionService:
                 for item in relations
                 if all(participant.entity_id in visible_ids for participant in item.participants)
             ]
+        if query.entity_limit is not None and len(entities) > query.entity_limit:
+            entities = sorted(
+                entities,
+                key=lambda item: (
+                    0
+                    if query.root_entity_id is not None and item.id == query.root_entity_id
+                    else 1,
+                    item.type_key,
+                    item.name,
+                    str(item.id),
+                ),
+            )[: query.entity_limit]
+            visible_ids = {item.id for item in entities}
+            relations = [
+                item
+                for item in relations
+                if all(participant.entity_id in visible_ids for participant in item.participants)
+            ]
+        if query.relation_limit is not None:
+            relations = relations[: query.relation_limit]
         return GraphView(
             project_id=project_id,
             revision=project.revision,
@@ -1295,4 +1317,14 @@ class ProjectionService:
             for item in relations
             if all(participant.entity_id in visible_ids for participant in item.participants)
         ]
+        if query.entity_limit is not None:
+            entities = entities[: query.entity_limit]
+            visible_ids = {item.id for item in entities}
+            relations = [
+                item
+                for item in relations
+                if all(participant.entity_id in visible_ids for participant in item.participants)
+            ]
+        if query.relation_limit is not None:
+            relations = relations[: query.relation_limit]
         return graph.model_copy(update={"entities": entities, "relations": relations})

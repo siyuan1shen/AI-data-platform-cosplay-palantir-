@@ -18,21 +18,21 @@ export function AdvancedToolsPage() {
   const workspace = useWorkspace();
   const navigate = useNavigate();
   return <div className="page-stack">
-    <section className="page-hero"><div><p className="eyebrow">ADVANCED TOOLS</p><h1>高级工具与设置</h1><p>配置 Agent 模型；选定项目后再进行系统接入、发布和导出。</p></div>{workspace.selectedProjectId && <button className="button primary" onClick={() => navigate(`/executive?project=${workspace.selectedProjectId}&preview=true`)}>预览当前投影</button>}</section>
+    <section className="page-hero"><div><p className="eyebrow">SYSTEM CONNECTIONS</p><h1>信息系统接入</h1><p>在当前公司的统一企业投影下接入系统、校验语义、审核发布并导出；低频开发设置收在下方折叠区域。</p></div>{workspace.selectedProjectId && <button className="button primary" onClick={() => navigate("/executive?preview=true")}>预览当前投影</button>}</section>
     <ModelProfilesPanel />
     <RestoreCenter onRestored={workspace.refresh} />
-    {workspace.selectedProjectId && workspace.selectedProject ? <AdvancedTools key={workspace.selectedProjectId} projectId={workspace.selectedProjectId} projectRevision={workspace.selectedProject.revision} refreshWorkspace={workspace.refresh} /> : <StatusMessage title="尚未选择项目" description="模型可以先配置；系统接入、发布和导出需要先在“公司与项目”中建立项目。" />}
+    {workspace.selectedProjectId && workspace.selectedProject ? <AdvancedTools key={workspace.selectedProjectId} projectId={workspace.selectedProjectId} projectRevision={workspace.selectedProject.revision} refreshWorkspace={workspace.refresh} /> : <StatusMessage title="尚未选择企业" description="模型可以先配置；系统接入、发布和导出需要先在“企业”中选择公司。" />}
   </div>;
 }
 
 function AdvancedTools({ projectId, projectRevision, refreshWorkspace }: { projectId: string; projectRevision: number; refreshWorkspace: () => Promise<void> }) {
   const navigate = useNavigate();
   return <>
-    <details className="advanced-section" open><summary><span><strong>系统语义 Agent 与数据对齐</strong><small>让 Agent 起草映射，再由人预览、校验、批准并执行本次同步</small></span><i>展开 / 收起</i></summary><div className="advanced-section-body advanced-stack"><AgentWorkspace projectId={projectId} kind="SYSTEM_ONTOLOGY" title="系统语义 Agent" description="说明系统、表、字段含义与目标企业对象；Agent 可以提出语义映射动作或只读字段候选，人工复核后保存为草稿，再校验、批准并执行。" /><SourceDataPanel projectId={projectId} /></div></details>
-    <details className="advanced-section"><summary><span><strong>变更校验与正式发布</strong><small>审核 Agent 提案并发布管理层版本</small></span><i>展开 / 收起</i></summary><div className="advanced-section-body"><ReleasePanel projectId={projectId} projectRevision={projectRevision} refreshWorkspace={refreshWorkspace} /></div></details>
+    <details className="advanced-section" open><summary><span><strong>建设 Agent · 系统接入模式</strong><small>同一个建设 Agent 的另一种受控工作模式：起草映射，再由人预览、校验、批准并执行同步</small></span><i>展开 / 收起</i></summary><div className="advanced-section-body advanced-stack"><AgentWorkspace projectId={projectId} kind="SYSTEM_ONTOLOGY" title="建设 Agent · 系统接入" description="说明系统、表、字段含义与目标企业对象；Agent 可以提出语义映射动作或只读字段候选，人工复核后保存为草稿，再校验、批准并执行。" /><SourceDataPanel projectId={projectId} /></div></details>
+    <details id="release" className="advanced-section" open><summary><span><strong>变更校验与正式发布</strong><small>审核企业投影 Agent 提案并发布公司版本</small></span><i>展开 / 收起</i></summary><div className="advanced-section-body"><ReleasePanel projectId={projectId} projectRevision={projectRevision} refreshWorkspace={refreshWorkspace} /></div></details>
     <details className="advanced-section"><summary><span><strong>导出与学习案例</strong><small>导出企业投影，维护本项目案例和匿名参考目录</small></span><i>展开 / 收起</i></summary><div className="advanced-section-body advanced-stack"><ExportCenter projectId={projectId} /><LearningCasesPanel projectId={projectId} /></div></details>
     <details className="advanced-section"><summary><span><strong>评测与回归</strong><small>用固定案例实际运行 Agent，核对引用、动作和回答边界</small></span><i>展开 / 收起</i></summary><div className="advanced-section-body"><EvaluationPanel projectId={projectId} /></div></details>
-    <details className="advanced-section"><summary><span><strong>动作目录与扩展</strong><small>低频开发功能：检查、启停或扩展 Agent 可调用的受控动作</small></span><i>展开 / 收起</i></summary><div className="advanced-section-body"><ActionDefinitionsPanel projectId={projectId} onOpenExecution={() => navigate(`/executive/decisions?project=${projectId}#actions`)} /></div></details>
+    <details className="advanced-section"><summary><span><strong>动作目录与扩展</strong><small>低频开发功能：检查、启停或扩展 Agent 可调用的受控动作</small></span><i>展开 / 收起</i></summary><div className="advanced-section-body"><ActionDefinitionsPanel projectId={projectId} onOpenExecution={() => navigate("/executive/agent#actions")} /></div></details>
   </>;
 }
 

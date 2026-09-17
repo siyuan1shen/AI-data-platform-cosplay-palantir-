@@ -30,6 +30,10 @@ class PortfolioService:
         row = CompanyRow(**payload.model_dump())
         self.session.add(row)
         self.session.flush()
+        # A company is immediately usable.  Creating the canonical projection
+        # in the same transaction keeps the API response, the selector and the
+        # first material import on one stable storage key.
+        self.ensure_workspace(UUID(row.id))
         return CompanyView.model_validate(row)
 
     def company(self, company_id: UUID) -> CompanyView:
@@ -46,12 +50,58 @@ class PortfolioService:
         statement = select(ProjectRow)
         if company_id is not None:
             statement = statement.where(ProjectRow.company_id == str(company_id))
-        rows = self.session.scalars(statement.order_by(ProjectRow.name)).all()
+        rows = self.session.scalars(
+            statement.order_by(ProjectRow.is_primary.desc(), ProjectRow.created_at, ProjectRow.name)
+        ).all()
         return [ProjectView.model_validate(row) for row in rows]
+
+    def ensure_workspace(self, company_id: UUID) -> ProjectView:
+        """Return the company's single projection storage key.
+
+        This endpoint is idempotent and exists for the new company-centered UI.
+        The legacy project endpoint remains available for old bundles and tests,
+        but the normal user flow never creates a second model container.
+        """
+        company = self.require_company(company_id)
+        primary = None
+        if company.canonical_project_id:
+            primary = self.session.get(ProjectRow, company.canonical_project_id)
+        if primary is None:
+            primary = self.session.scalar(
+                select(ProjectRow)
+                .where(ProjectRow.company_id == str(company_id))
+                .order_by(ProjectRow.is_primary.desc(), ProjectRow.created_at, ProjectRow.id)
+                .limit(1)
+            )
+        if primary is None:
+            primary = ProjectRow(
+                company_id=str(company_id),
+                name="企业总体投影",
+                description="公司统一的企业数字投影；专题工作作为草稿或任务附着在此空间。",
+                status="ACTIVE",
+                is_primary=True,
+            )
+            self.session.add(primary)
+            self.session.flush()
+            from enterprise_insight_backend.actions import ActionService
+            from enterprise_insight_backend.ontology import OntologyService
+
+            ActionService(self.session).ensure_defaults(UUID(primary.id))
+            OntologyService(self.session).install_default_pack(UUID(primary.id))
+        company.canonical_project_id = primary.id
+        primary.is_primary = True
+        primary.canonical_project_id = primary.id
+        self.session.flush()
+        return ProjectView.model_validate(primary)
 
     def create_project(self, company_id: UUID, payload: ProjectCreate) -> ProjectView:
         self.require_company(company_id)
-        row = ProjectRow(company_id=str(company_id), **payload.model_dump())
+        row = ProjectRow(
+            company_id=str(company_id),
+            canonical_project_id=None,
+            is_primary=False,
+            **payload.model_dump(),
+        )
         self.session.add(row)
         try:
             self.session.flush()

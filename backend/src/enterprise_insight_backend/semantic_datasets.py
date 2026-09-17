@@ -127,14 +127,26 @@ class SemanticDatasetService:
             snapshot_id = payload.query_snapshot_id
         graph = self.snapshots.graph(project_id, snapshot_id)
         entities = {str(item.id): item for item in graph.entities}
-        roots = sorted(
+        available_roots = sorted(
             (item for item in graph.entities if item.type_key == dataset.root_type_key),
-            key=lambda item: (item.stable_key or "", item.name, str(item.id)),
-        )[: payload.limit]
+            # A snapshot preserves entity creation order. Use it for pagination
+            # so page boundaries remain intuitive even when human-readable
+            # names use a locale whose collation is not available to Python.
+            key=lambda item: (item.created_at, str(item.id)),
+        )
+        total_rows = len(available_roots)
+        roots = available_roots[payload.offset : payload.offset + payload.limit]
         relation_index: dict[tuple[str, str, str], dict[str, set[str]]] = defaultdict(
             lambda: defaultdict(set)
         )
+        required_relation_types = {
+            step.relation_type_key
+            for column in columns
+            for step in column.path
+        }
         for relation in graph.relations:
+            if relation.type_key not in required_relation_types:
+                continue
             participants_by_role: dict[str, builtins.list[str]] = defaultdict(list)
             for participant in relation.participants:
                 participants_by_role[participant.role_key].append(str(participant.entity_id))
@@ -180,7 +192,16 @@ class SemanticDatasetService:
             rows.append(result)
         plan = {
             "root_type_key": dataset.root_type_key,
-            "root_rows": len(roots),
+            "root_rows": total_rows,
+            "offset": payload.offset,
+            "limit": payload.limit,
+            "returned_rows": len(rows),
+            "next_offset": (
+                payload.offset + len(rows)
+                if payload.offset + len(rows) < total_rows
+                else None
+            ),
+            "truncated": payload.offset + len(rows) < total_rows,
             "row_cardinality": "ONE_ROW_PER_DISTINCT_ROOT_ENTITY",
             "join_safety": "PATH_TARGETS_DEDUPLICATED_BY_ENTITY_ID",
             "columns": [item.model_dump(mode="json") for item in columns],
@@ -200,6 +221,11 @@ class SemanticDatasetService:
                 "run_id": run.id,
                 "dataset_id": dataset.id,
                 "query_snapshot_id": snapshot_id,
+                "total_rows": total_rows,
+                "offset": payload.offset,
+                "limit": payload.limit,
+                "next_offset": plan["next_offset"],
+                "truncated": plan["truncated"],
                 "columns": columns,
                 "rows": rows,
                 "warnings": warnings,

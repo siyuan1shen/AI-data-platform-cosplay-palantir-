@@ -120,6 +120,7 @@ class CollaborationService:
             or {
                 "PROJECTION": "新的企业投影对话",
                 "MANAGEMENT": "新的管理探索对话",
+                "MANAGEMENT_INPUT": "新的管理输入对话",
                 "SYSTEM_ONTOLOGY": "新的系统对齐对话",
             }[payload.agent_kind.value]
         )
@@ -160,6 +161,15 @@ class CollaborationService:
         payload: AgentMessageCreate,
     ) -> AgentMessageAccepted:
         thread = self.require_thread(project_id, thread_id)
+        if (
+            payload.task_intent_candidate is not None
+            and thread.agent_kind != AgentKind.MANAGEMENT.value
+        ):
+            raise DomainError(
+                "TASK_INTENT_CANDIDATE_WRONG_AGENT",
+                "任务意图候选只可附加到管理输出 Agent 对话。",
+                status_code=422,
+            )
         LearningCaseService(self.session).require_references(project_id, payload.reference_case_ids)
         if payload.attachment_ids:
             document_ids = set(
@@ -226,6 +236,11 @@ class CollaborationService:
                 ),
                 "allow_external_model": payload.allow_external_model,
                 "share_project_context_with_model": payload.share_project_context_with_model,
+                "task_intent_candidate": (
+                    payload.task_intent_candidate.model_dump(mode="json")
+                    if payload.task_intent_candidate is not None
+                    else None
+                ),
             },
         )
         self.session.add(run)

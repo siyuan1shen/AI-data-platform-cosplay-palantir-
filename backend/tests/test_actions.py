@@ -263,6 +263,35 @@ def test_dry_run_does_not_mutate_and_low_risk_agent_action_runs(client: TestClie
     assert hypotheses.json()["total"] == 1
 
 
+def test_formal_enterprise_summary_action_is_bounded_and_read_only(client: TestClient) -> None:
+    project_id = _project(client)
+    definitions = client.get(f"/api/v3/projects/{project_id}/action-definitions").json()["items"]
+    summary = next(item for item in definitions if item["key"] == "read_enterprise_summary")
+    invocation = client.post(
+        f"/api/v3/projects/{project_id}/action-invocations",
+        json={
+            "action_definition_id": summary["id"],
+            "idempotency_key": "enterprise-summary-1",
+            "input": {},
+        },
+    )
+    assert invocation.status_code == 201, invocation.text
+    invocation_id = invocation.json()["id"]
+    preview = client.post(
+        f"/api/v3/projects/{project_id}/action-invocations/{invocation_id}/dry-run"
+    )
+    assert preview.status_code == 200, preview.text
+    executed = client.post(
+        f"/api/v3/projects/{project_id}/action-invocations/{invocation_id}/execute"
+    )
+    assert executed.status_code == 200, executed.text
+    result = executed.json()["result"]
+    assert result["resource"] == "ENTERPRISE_SUMMARY"
+    assert result["trusted"] is True
+    assert result["entity_count"] == 0
+    assert result["relation_count"] == 0
+
+
 def test_projection_agent_can_apply_an_atomic_multi_resource_change(
     client: TestClient,
 ) -> None:

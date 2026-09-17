@@ -5,6 +5,7 @@ import { api } from "../../api";
 import { StatusMessage } from "../../components/StatusMessage";
 import type { ProjectionElementData } from "../../features/projection/toElements";
 import { useWorkspace } from "../../workspace/WorkspaceContext";
+import { WorkObservationPanel } from "./WorkObservationPanel";
 
 const ProjectionGraphModule = lazy(async () => ({ default: (await import("../../features/projection/ProjectionGraph")).ProjectionGraph }));
 
@@ -35,7 +36,7 @@ export function ProjectionPage() {
   const typeCount = useMemo(() => new Set(data?.graph.entities.map((entity) => entity.type_key) ?? []).size, [data]);
 
   if (!projectId) {
-    return <StatusMessage title="请先建立企业投影项目" description="切换到建设端，新建公司和项目后即可预览企业投影。" />;
+    return <StatusMessage title="请先建立企业" description="切换到建设端创建或选择公司，系统会自动打开该公司的统一企业投影。" />;
   }
   if (contextQuery.isLoading) {
     return <StatusMessage title="正在加载企业投影" description="正在读取对象、关系和发布状态。" />;
@@ -100,6 +101,8 @@ export function ProjectionPage() {
           )}
         </aside>
       </section>
+
+      <WorkObservationPanel projectId={projectId} />
     </div>
   );
 }

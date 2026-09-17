@@ -148,7 +148,10 @@ def test_persistent_golden_set_scores_and_retains_agent_regressions(
         json={"format": "json", "include_evidence": False, "include_lineage": False},
     )
     assert export.status_code == 201, export.text
-    bundle = json.loads(client.get(export.json()["download_url"]).content.decode("utf-8"))
+    export_payload = export.json()
+    assert export_payload["status"] == "COMPLETED", export_payload.get("error")
+    assert export_payload["download_url"]
+    bundle = json.loads(client.get(export_payload["download_url"]).content.decode("utf-8"))
     assert bundle["evaluations"]["suites"][0]["name"] == "管理判断事实边界"
     assert len(bundle["evaluations"]["runs"]) == 2
     assert len(bundle["evaluations"]["results"]) == 2

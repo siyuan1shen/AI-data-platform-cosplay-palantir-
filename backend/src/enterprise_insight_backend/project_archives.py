@@ -56,6 +56,7 @@ from enterprise_insight_backend.models import (
     QuerySnapshotRow,
     RawBatchRow,
     RawRecordRow,
+    RawRecordValueRow,
     RelationParticipantRow,
     RelationRow,
     ScenarioRow,
@@ -126,6 +127,9 @@ ARCHIVE_TABLES: tuple[ArchiveTable, ...] = (
     ArchiveTable("query_snapshots", QuerySnapshotRow),
     ArchiveTable("raw_batches", RawBatchRow),
     ArchiveTable("raw_records", RawRecordRow),
+    # This is a rebuildable lookup index, but carrying it in a project archive
+    # keeps restores immediately queryable without a second full reindex pass.
+    ArchiveTable("raw_record_values", RawRecordValueRow),
     ArchiveTable("materialization_runs", MaterializationRunRow),
     ArchiveTable("source_identities", SourceIdentityRow),
     ArchiveTable("semantic_mappings", SemanticMappingRow),
@@ -179,6 +183,10 @@ def build_project_archive(session: Session, project_id: UUID) -> dict[str, Any]:
     source_connections_reset = len(tables["source_systems"])
     for record in tables["source_systems"]:
         record["connection_profile"] = {}
+        # Source connector credentials live outside connection_profile after
+        # encryption. Project archives must never carry ciphertext whose key
+        # is intentionally excluded from the portable project bundle.
+        record["encrypted_connection_secrets"] = None
         record["status"] = "NEEDS_CONFIGURATION"
         record["last_tested_at"] = None
     for record in tables["evaluation_runs"]:

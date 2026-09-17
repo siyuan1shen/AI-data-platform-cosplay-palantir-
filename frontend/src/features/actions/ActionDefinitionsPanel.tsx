@@ -63,7 +63,7 @@ export function ActionDefinitionsPanel({ projectId, onOpenExecution }: ActionDef
               </div>
             </article>
           ))}
-          {!definitionsQuery.data?.items.length && <p className="empty-copy">当前项目还没有动作定义。</p>}
+          {!definitionsQuery.data?.items.length && <p className="empty-copy">当前企业还没有动作定义。</p>}
         </div>
       )}
       <div className="inline-advanced action-catalog-note">

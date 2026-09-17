@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from math import isfinite
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from enterprise_insight_backend.task_classifier import TaskIntentCandidate
 
 
 class StrictModel(BaseModel):
@@ -14,6 +17,189 @@ class StrictModel(BaseModel):
 
 class Page[T](StrictModel):
     items: list[T]
+    total: int = Field(ge=0)
+
+
+class ManagementObservationKind(StrEnum):
+    MEETING = "MEETING"
+    MEETING_NOTE = "MEETING_NOTE"
+    WORK_REPORT = "WORK_REPORT"
+    REPORT = "REPORT"
+    METRIC_RESULT = "METRIC_RESULT"
+    INCIDENT = "INCIDENT"
+    INTERVIEW = "INTERVIEW"
+    SURVEY = "SURVEY"
+    DIRECT_OBSERVATION = "DIRECT_OBSERVATION"
+    WORK_SAMPLE = "WORK_SAMPLE"
+    SYSTEM_EVENT = "SYSTEM_EVENT"
+    NORMATIVE_DOCUMENT = "NORMATIVE_DOCUMENT"
+    OTHER = "OTHER"
+
+
+class ObservationStatementKind(StrEnum):
+    EVENT = "EVENT"
+    STATEMENT = "STATEMENT"
+    OPINION = "OPINION"
+    REQUEST = "REQUEST"
+    HEARSAY = "HEARSAY"
+    INFERENCE = "INFERENCE"
+
+
+class ObservationExtractionItem(StrictModel):
+    kind: ObservationStatementKind
+    statement: str = Field(min_length=1, max_length=3000)
+    supporting_quote: str = Field(min_length=1, max_length=3000)
+    speaker: str | None = Field(default=None, max_length=200)
+    time_expression: str | None = Field(default=None, max_length=200)
+
+
+class ObservationExtractionDraft(StrictModel):
+    items: list[ObservationExtractionItem] = Field(default_factory=list, max_length=30)
+    unresolved: list[str] = Field(default_factory=list, max_length=30)
+
+
+class ObservationExtractRequest(StrictModel):
+    model_profile_id: UUID
+    allow_external_model: bool = False
+
+
+class ObservationExtractionView(StrictModel):
+    id: UUID
+    observation_id: UUID
+    source_revision: int
+    model_profile_id: UUID
+    model_name: str
+    status: str
+    items: list[ObservationExtractionItem]
+    unresolved: list[str]
+    error_code: str | None
+    created_at: datetime
+
+
+class ObservationExtractionHistoryView(StrictModel):
+    items: list[ObservationExtractionView]
+    total: int = Field(ge=0)
+
+
+class ObservationExtractionReviewDecision(StrEnum):
+    CONFIRM = "CONFIRM"
+    REVISE = "REVISE"
+    REJECT = "REJECT"
+
+
+class ObservationExtractionReviewCreate(StrictModel):
+    expected_source_revision: int = Field(ge=1)
+    decision: ObservationExtractionReviewDecision
+    items: list[ObservationExtractionItem] | None = Field(default=None, max_length=30)
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_review_payload(self) -> ObservationExtractionReviewCreate:
+        if self.decision == ObservationExtractionReviewDecision.REVISE and self.items is None:
+            raise ValueError("修改抽取结果时必须提交修订后的条目。")
+        if self.decision != ObservationExtractionReviewDecision.REVISE and self.items is not None:
+            raise ValueError("只有修改抽取结果时才能提交条目。")
+        if self.reason is not None:
+            self.reason = self.reason.strip() or None
+        return self
+
+
+class ObservationExtractionReviewView(StrictModel):
+    id: UUID
+    observation_id: UUID
+    extraction_id: UUID
+    source_revision: int
+    decision: ObservationExtractionReviewDecision
+    items: list[ObservationExtractionItem]
+    reason: str | None
+    reviewed_by: str
+    created_at: datetime
+
+
+class ObservationExtractionReviewHistoryView(StrictModel):
+    items: list[ObservationExtractionReviewView]
+    total: int = Field(ge=0)
+
+
+class ObservationCreate(StrictModel):
+    kind: ManagementObservationKind
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=50_000)
+    occurred_at: datetime | None = None
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def trim_required_text(self) -> ObservationCreate:
+        self.title = self.title.strip()
+        self.content = self.content.strip()
+        if not self.title or not self.content:
+            raise ValueError("标题和内容不能为空。")
+        return self
+
+
+class ObservationUpdate(StrictModel):
+    expected_revision: int = Field(ge=1)
+    kind: ManagementObservationKind
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=50_000)
+    occurred_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def trim_required_text(self) -> ObservationUpdate:
+        self.title = self.title.strip()
+        self.content = self.content.strip()
+        if not self.title or not self.content:
+            raise ValueError("标题和内容不能为空。")
+        return self
+
+
+class ObservationView(StrictModel):
+    id: UUID
+    company_id: UUID
+    project_id: UUID
+    kind: ManagementObservationKind
+    title: str
+    content: str
+    content_sha256: str
+    occurred_at: datetime | None
+    submitted_by: str
+    status: str
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ObservationAttachmentView(StrictModel):
+    id: UUID
+    observation_id: UUID
+    file_name: str
+    media_type: str
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0)
+    created_at: datetime
+
+
+class ObservationIngestionView(StrictModel):
+    observation: ObservationView
+    attachment: ObservationAttachmentView
+    parser_version: str
+    extracted_character_count: int = Field(ge=0)
+    preview_truncated: bool
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ObservationVersionView(StrictModel):
+    id: UUID
+    observation_id: UUID
+    revision: int
+    snapshot: dict[str, Any]
+    operation: str
+    actor_id: str
+    created_at: datetime
+
+
+class ObservationHistoryView(StrictModel):
+    items: list[ObservationVersionView]
     total: int = Field(ge=0)
 
 
@@ -82,6 +268,7 @@ class CompanyView(StrictModel):
     name: str
     industry: str | None
     description: str | None
+    canonical_project_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -103,6 +290,8 @@ class ProjectView(StrictModel):
     name: str
     description: str | None
     status: ProjectStatus
+    is_primary: bool = False
+    canonical_project_id: UUID | None = None
     revision: int
     created_at: datetime
     updated_at: datetime
@@ -335,6 +524,10 @@ class GraphQuery(StrictModel):
     include_retired: bool = False
     include_unmodeled: bool = False
     include_observations: bool = True
+    # Optional server-side bounds for callers that need a working set rather
+    # than the complete graph. Agent context builders always provide bounds.
+    entity_limit: int | None = Field(default=None, ge=1, le=20_000)
+    relation_limit: int | None = Field(default=None, ge=1, le=50_000)
     query_snapshot_id: UUID | None = None
     release_id: UUID | None = None
     scenario_id: UUID | None = None
@@ -421,6 +614,7 @@ class ChangePreview(StrictModel):
 
 class AgentKind(StrEnum):
     PROJECTION = "PROJECTION"
+    MANAGEMENT_INPUT = "MANAGEMENT_INPUT"
     MANAGEMENT = "MANAGEMENT"
     SYSTEM_ONTOLOGY = "SYSTEM_ONTOLOGY"
 
@@ -456,12 +650,16 @@ class AgentMessageRole(StrEnum):
 
 class AgentMessageCreate(StrictModel):
     content: str = Field(min_length=1, max_length=100_000)
+    idempotency_key: str | None = Field(
+        default=None, min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"
+    )
     attachment_ids: list[UUID] = Field(default_factory=list)
     include_unconfirmed_material: bool = True
     reference_case_ids: list[UUID] = Field(default_factory=list)
     model_profile_id: UUID | None = None
     allow_external_model: bool = False
     share_project_context_with_model: bool = False
+    task_intent_candidate: TaskIntentCandidate | None = None
 
 
 class AgentMessageView(StrictModel):
@@ -470,6 +668,9 @@ class AgentMessageView(StrictModel):
     role: AgentMessageRole
     content: str
     citations: list[EvidenceReference] = Field(default_factory=list)
+    source_observation_id: UUID | None = None
+    source_revision: int | None = Field(default=None, ge=1)
+    external_model_used: bool = False
     created_at: datetime
 
 
@@ -532,10 +733,46 @@ class AgentActionProposal(StrictModel):
     reason: str | None = Field(default=None, max_length=4000)
 
 
+class AgentClaimKind(StrEnum):
+    FACT = "FACT"
+    ASSUMPTION = "ASSUMPTION"
+    HYPOTHESIS = "HYPOTHESIS"
+    RECOMMENDATION = "RECOMMENDATION"
+    UNKNOWN = "UNKNOWN"
+
+
+class AgentClaim(StrictModel):
+    """One conclusion with explicit epistemic type and source references."""
+
+    statement: str = Field(min_length=1, max_length=4000)
+    kind: AgentClaimKind
+    supporting_refs: list[str] = Field(default_factory=list, max_length=50)
+    counterevidence_refs: list[str] = Field(default_factory=list, max_length=50)
+    scope: str | None = Field(default=None, max_length=2000)
+    unknowns: list[str] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def references_are_supported_schemes(self) -> AgentClaim:
+        allowed_prefixes = (
+            "formal://",
+            "observation://",
+            "potential://",
+            "tool://",
+        )
+        for reference in [*self.supporting_refs, *self.counterevidence_refs]:
+            if not reference.startswith(allowed_prefixes) or len(reference) > 300:
+                raise ValueError("claim references must use a supported source URI")
+        return self
+
+
 class AgentStructuredOutput(StrictModel):
     content: str = Field(min_length=1, max_length=100_000)
     citations: list[EvidenceReference] = Field(default_factory=list)
     action_proposals: list[AgentActionProposal] = Field(default_factory=list)
+    claims: list[AgentClaim] = Field(default_factory=list, max_length=100)
+    potential_candidate_proposals: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=20
+    )
 
 
 class ActionRiskLevel(StrEnum):
@@ -602,6 +839,7 @@ class ActionInvocationStatus(StrEnum):
     APPROVED = "APPROVED"
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
+    OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     OBSERVING = "OBSERVING"
@@ -642,6 +880,168 @@ class ActionInvocationView(StrictModel):
     finished_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class ManagementActionStatus(StrEnum):
+    OPEN = "OPEN"
+    IN_PROGRESS = "IN_PROGRESS"
+    CANCELLED = "CANCELLED"
+
+
+class ManagementActionActiveStatus(StrEnum):
+    OPEN = "OPEN"
+    IN_PROGRESS = "IN_PROGRESS"
+
+
+class ManagementActionPriority(StrEnum):
+    LOW = "LOW"
+    NORMAL = "NORMAL"
+    HIGH = "HIGH"
+    URGENT = "URGENT"
+
+
+class ManagementActionEventType(StrEnum):
+    CREATED = "CREATED"
+    UPDATED = "UPDATED"
+    CANCELLED = "CANCELLED"
+    PROGRESS = "PROGRESS"
+    OUTCOME = "OUTCOME"
+    DONE_REPORTED = "DONE_REPORTED"
+    DONE_VERIFIED = "DONE_VERIFIED"
+
+
+class ManagementActionCreate(StrictModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=20_000)
+    owner: str | None = Field(default=None, max_length=200)
+    priority: ManagementActionPriority = ManagementActionPriority.NORMAL
+    due_at: datetime | None = None
+    reason: str | None = Field(default=None, max_length=4_000)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def trim_text(self) -> ManagementActionCreate:
+        self.title = self.title.strip()
+        if not self.title:
+            raise ValueError("管理行动标题不能为空。")
+        if self.description is not None:
+            self.description = self.description.strip() or None
+        if self.owner is not None:
+            self.owner = self.owner.strip() or None
+        if self.reason is not None:
+            self.reason = self.reason.strip() or None
+        if self.idempotency_key is not None:
+            self.idempotency_key = self.idempotency_key.strip()
+            if not self.idempotency_key:
+                raise ValueError("幂等标识不能是空白。")
+        return self
+
+
+class ManagementActionUpdate(StrictModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=20_000)
+    owner: str | None = Field(default=None, max_length=200)
+    priority: ManagementActionPriority | None = None
+    status: ManagementActionActiveStatus | None = None
+    due_at: datetime | None = None
+    expected_revision: int = Field(ge=1)
+    reason: str | None = Field(default=None, max_length=4_000)
+
+    @model_validator(mode="after")
+    def validate_changes(self) -> ManagementActionUpdate:
+        changed = self.model_fields_set - {"expected_revision", "reason"}
+        if not changed:
+            raise ValueError("至少提供一项需要修改的内容。")
+        for field_name in ("title", "priority", "status"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} 不能设为空。")
+        if self.title is not None:
+            self.title = self.title.strip()
+            if not self.title:
+                raise ValueError("管理行动标题不能为空。")
+        if self.description is not None:
+            self.description = self.description.strip() or None
+        if self.owner is not None:
+            self.owner = self.owner.strip() or None
+        if self.reason is not None:
+            self.reason = self.reason.strip() or None
+        return self
+
+
+class ManagementActionRevisionRequest(StrictModel):
+    expected_revision: int = Field(ge=1)
+    reason: str | None = Field(default=None, max_length=4_000)
+
+    @model_validator(mode="after")
+    def trim_reason(self) -> ManagementActionRevisionRequest:
+        if self.reason is not None:
+            self.reason = self.reason.strip() or None
+        return self
+
+
+class ManagementActionEventCreate(StrictModel):
+    message: str = Field(min_length=1, max_length=20_000)
+    details: dict[str, Any] = Field(default_factory=dict)
+    expected_revision: int = Field(ge=1)
+    reason: str | None = Field(default=None, max_length=4_000)
+
+    @model_validator(mode="after")
+    def trim_text(self) -> ManagementActionEventCreate:
+        self.message = self.message.strip()
+        if not self.message:
+            raise ValueError("记录内容不能为空。")
+        if self.reason is not None:
+            self.reason = self.reason.strip() or None
+        return self
+
+
+class ManagementActionVerifyDone(ManagementActionRevisionRequest):
+    verification_note: str = Field(min_length=1, max_length=20_000)
+
+    @model_validator(mode="after")
+    def trim_verification_note(self) -> ManagementActionVerifyDone:
+        self.verification_note = self.verification_note.strip()
+        if not self.verification_note:
+            raise ValueError("核实说明不能为空。")
+        return self
+
+
+class ManagementActionView(StrictModel):
+    id: UUID
+    company_id: UUID
+    project_id: UUID
+    title: str
+    description: str | None
+    owner: str | None
+    priority: ManagementActionPriority
+    status: ManagementActionStatus
+    due_at: datetime | None
+    reported_done_at: datetime | None
+    reported_done_by: str | None
+    verified_done_at: datetime | None
+    verified_done_by: str | None
+    reported_done: bool
+    verified_done: bool
+    revision: int
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ManagementActionEventView(StrictModel):
+    id: UUID
+    company_id: UUID
+    project_id: UUID
+    action_id: UUID
+    revision: int
+    event_type: ManagementActionEventType
+    message: str | None
+    details: dict[str, Any]
+    from_status: ManagementActionStatus | None
+    to_status: ManagementActionStatus | None
+    actor_id: str
+    reason: str | None
+    created_at: datetime
 
 
 class ActionApprovalRequest(StrictModel):
@@ -863,6 +1263,101 @@ class ScenarioComparisonView(StrictModel):
 class ScenarioCompareRequest(StrictModel):
     left_scenario_id: UUID
     right_scenario_id: UUID
+
+
+class ScenarioCaseInput(StrictModel):
+    """One explicit alternative in a deterministic flow calculation."""
+
+    key: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    label: str = Field(min_length=1, max_length=200)
+    periods: list[str] = Field(min_length=1, max_length=366)
+    demand: list[float] = Field(min_length=1, max_length=366)
+    capacity: list[float] = Field(min_length=1, max_length=366)
+    initial_inventory: float = Field(default=0, ge=0)
+    initial_backlog: float = Field(default=0, ge=0)
+    unit: str = Field(default="units", min_length=1, max_length=50)
+    flow_mode: Literal["STORABLE_GOODS", "NON_STORABLE_SERVICE"] = "STORABLE_GOODS"
+
+    @model_validator(mode="after")
+    def validate_series(self) -> ScenarioCaseInput:
+        lengths = {len(self.periods), len(self.demand), len(self.capacity)}
+        if len(lengths) != 1:
+            raise ValueError("periods、demand 和 capacity 必须长度一致。")
+        if any(
+            not isfinite(value)
+            for value in self.demand
+            + self.capacity
+            + [self.initial_inventory, self.initial_backlog]
+        ):
+            raise ValueError("需求、产能、库存和积压必须是有限数字。")
+        if any(value < 0 for value in self.demand + self.capacity):
+            raise ValueError("需求和产能不能为负数。")
+        self.periods = [period.strip() for period in self.periods]
+        if any(not period for period in self.periods):
+            raise ValueError("周期不能为空。")
+        if len(self.periods) != len(set(self.periods)):
+            raise ValueError("周期标识必须唯一。")
+        if self.flow_mode == "NON_STORABLE_SERVICE" and self.initial_inventory:
+            raise ValueError("不可储存服务能力不能设置初始库存。")
+        self.label = self.label.strip()
+        self.unit = self.unit.strip()
+        if not self.label or not self.unit:
+            raise ValueError("方案名称和单位不能为空。")
+        return self
+
+
+class ScenarioSimulationRequest(StrictModel):
+    cases: list[ScenarioCaseInput] = Field(min_length=1, max_length=20)
+    created_by: str = Field(default="management", min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def unique_case_keys(self) -> ScenarioSimulationRequest:
+        keys = [item.key for item in self.cases]
+        if len(keys) != len(set(keys)):
+            raise ValueError("情景方案标识必须唯一。")
+        return self
+
+
+class ScenarioSimulationAction(StrictModel):
+    """Action payload for a persisted, read-only scenario run."""
+
+    scenario_id: UUID
+    cases: list[ScenarioCaseInput] = Field(min_length=1, max_length=20)
+    created_by: str = Field(default="management", min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def unique_case_keys(self) -> ScenarioSimulationAction:
+        keys = [item.key for item in self.cases]
+        if len(keys) != len(set(keys)):
+            raise ValueError("情景方案标识必须唯一。")
+        return self
+
+
+class ScenarioRunView(StrictModel):
+    id: UUID
+    project_id: UUID
+    scenario_id: UUID
+    scenario_revision: int
+    baseline_revision: int
+    status: str
+    input_snapshot: dict[str, Any]
+    rule_snapshot: dict[str, Any]
+    result: dict[str, Any]
+    errors: list[dict[str, Any]]
+    created_by: str
+    created_at: datetime
+
+
+class ScenarioRunCompareRequest(StrictModel):
+    left_run_id: UUID
+    right_run_id: UUID
+
+
+class ScenarioRunComparisonView(StrictModel):
+    left_run_id: UUID
+    right_run_id: UUID
+    cases: list[dict[str, Any]]
+    limitations: list[str]
 
 
 class LearningCaseStatus(StrEnum):
@@ -1539,6 +2034,60 @@ class ImportPreviewView(StrictModel):
     expires_at: datetime
 
 
+class LifecycleResourceKind(StrEnum):
+    """Resources that are safe to remove without changing enterprise truth."""
+
+    IMPORT_PREVIEW = "IMPORT_PREVIEW"
+    WORK_OBSERVATION_PREVIEW = "WORK_OBSERVATION_PREVIEW"
+    RESTORE_PREVIEW = "RESTORE_PREVIEW"
+    EXPORT_FILE = "EXPORT_FILE"
+
+
+class LifecyclePolicyView(StrictModel):
+    resource_kind: LifecycleResourceKind
+    automatic: bool
+    retention_description: str
+    deletion_scope: str
+
+
+class LifecycleCandidateView(StrictModel):
+    resource_kind: LifecycleResourceKind
+    resource_id: UUID
+    project_id: UUID | None
+    status: str
+    created_at: datetime
+    expires_at: datetime | None
+    reason: str
+
+
+class LifecyclePreviewView(StrictModel):
+    generated_at: datetime
+    policies: list[LifecyclePolicyView]
+    candidates: list[LifecycleCandidateView]
+    total: int = Field(ge=0)
+
+
+class LifecycleCleanupRequest(StrictModel):
+    resource_kinds: list[LifecycleResourceKind] = Field(default_factory=list, max_length=4)
+    candidate_ids: list[UUID] = Field(default_factory=list, max_length=200)
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
+class LifecycleDeleteRequest(StrictModel):
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
+class LifecycleCleanupResult(StrictModel):
+    run_id: UUID
+    deletion_mode: str
+    selected: int = Field(ge=0)
+    deleted: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    deleted_by_kind: dict[str, int]
+    errors: list[str]
+    completed_at: datetime
+
+
 class ImportConfirmRequest(StrictModel):
     preview_id: UUID
     mapping: dict[str, str] = Field(default_factory=dict)
@@ -1823,12 +2372,63 @@ class MaterialFragmentsReadAction(StrictModel):
     limit: int = Field(default=40, ge=1, le=100)
 
 
+class SourceObservationsReadAction(StrictModel):
+    """Read materialized ERP observations by exact keys or a controlled broad read."""
+
+    # Empty is reserved for the complex-management broad-read path. Simple
+    # queries are still routed with an exact source record key.
+    source_record_keys: list[str] = Field(default_factory=list, max_length=20)
+    field_keys: list[str] = Field(default_factory=list, max_length=50)
+    source_assets: list[str] = Field(default_factory=list, max_length=20)
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class ManagementObservationSearchAction(StrictModel):
+    query: str = Field(min_length=1, max_length=500)
+    scan_offset: int = Field(
+        default=0,
+        ge=0,
+        description="源记录扫描窗口起点；使用返回的 next_scan_offset 继续扫描。",
+    )
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class PotentialRecordsSearchAction(StrictModel):
+    query: str = Field(min_length=1, max_length=500)
+    include_history: bool = False
+    scan_offset: int = Field(
+        default=0,
+        ge=0,
+        description="源记录扫描窗口起点；使用返回的 next_scan_offset 继续扫描。",
+    )
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class WorkObservationReadAction(StrictModel):
+    analysis_id: UUID | None = None
+    employee_keys: list[str] = Field(default_factory=list, max_length=200)
+    include_segments: bool = False
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class WorkObservationCompareAction(StrictModel):
+    analysis_id: UUID
+    left_employee_keys: list[str] = Field(min_length=1, max_length=200)
+    right_employee_keys: list[str] = Field(min_length=1, max_length=200)
+
+
 class GraphNeighborhoodReadAction(StrictModel):
     root_entity_id: UUID
     depth: int = Field(default=2, ge=0, le=8)
     include_observations: bool = True
     max_entities: int = Field(default=500, ge=1, le=2000)
     max_relations: int = Field(default=1000, ge=1, le=10000)
+
+
+class EnterpriseSummaryReadAction(StrictModel):
+    """Read a bounded summary from the formal enterprise model."""
 
 
 class SemanticMappingAdvanceAction(StrictModel):
@@ -2038,6 +2638,7 @@ class SemanticDatasetView(SemanticDatasetCreate):
 
 class SemanticDatasetQuery(StrictModel):
     query_snapshot_id: UUID | None = None
+    offset: int = Field(default=0, ge=0)
     limit: int = Field(default=200, ge=1, le=5000)
     include_lineage: bool = True
 
@@ -2046,6 +2647,11 @@ class SemanticDatasetResult(StrictModel):
     run_id: UUID
     dataset_id: UUID
     query_snapshot_id: UUID
+    total_rows: int = Field(ge=0)
+    offset: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    next_offset: int | None = Field(default=None, ge=0)
+    truncated: bool
     columns: list[SemanticDatasetColumn]
     rows: list[dict[str, Any]]
     warnings: list[dict[str, Any]]
@@ -2059,6 +2665,8 @@ class SemanticDatasetExport(StrictModel):
 
 class SemanticDatasetQueryAction(SemanticDatasetQuery):
     dataset_id: UUID
+    limit: int = Field(default=50, ge=1, le=50)
+    include_lineage: Literal[True] = True
 
 
 class ExportRequest(StrictModel):

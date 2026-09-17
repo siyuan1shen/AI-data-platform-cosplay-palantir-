@@ -1,6 +1,22 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+
+from enterprise_insight_backend.schemas import SemanticDatasetQueryAction
+
+
+def test_agent_semantic_query_is_lineaged_and_bounded_to_50_rows() -> None:
+    dataset_id = str(uuid4())
+    assert SemanticDatasetQueryAction(dataset_id=dataset_id).limit == 50
+    assert SemanticDatasetQueryAction(dataset_id=dataset_id, limit=20).limit == 20
+    with pytest.raises(ValidationError):
+        SemanticDatasetQueryAction(dataset_id=dataset_id, include_lineage=False)
+    with pytest.raises(ValidationError):
+        SemanticDatasetQueryAction(dataset_id=dataset_id, limit=51)
 
 
 def _entity(
@@ -116,3 +132,55 @@ def test_semantic_dataset_deduplicates_paths_and_reuses_snapshot(
     assert "总编制" not in download.text
     assert "headcount" in download.text
     assert "5" in download.text
+
+
+def test_semantic_dataset_query_uses_snapshot_bound_pages(client: TestClient) -> None:
+    company = client.post("/api/v3/companies", json={"name": "语义分页企业"}).json()
+    project = client.post(
+        f"/api/v3/companies/{company['id']}/projects", json={"name": "语义分页项目"}
+    ).json()
+    project_id = project["id"]
+    client.post(f"/api/v3/projects/{project_id}/ontology/default-pack").raise_for_status()
+    first = _entity(client, project_id, "organization_unit", "甲部门")
+    _entity(client, project_id, "organization_unit", "乙部门")
+    dataset = client.post(
+        f"/api/v3/projects/{project_id}/semantic-datasets",
+        json={
+            "key": "department.names",
+            "name": "部门名称",
+            "root_type_key": "organization_unit",
+            "columns": [
+                {"key": "name", "label": "名称", "property_key": "__name__"}
+            ],
+        },
+    )
+    assert dataset.status_code == 201, dataset.text
+
+    first_page = client.post(
+        f"/api/v3/projects/{project_id}/semantic-datasets/{dataset.json()['id']}/query",
+        json={"offset": 0, "limit": 1},
+    )
+    assert first_page.status_code == 200, first_page.text
+    first_result = first_page.json()
+    assert first_result["total_rows"] == 2
+    assert first_result["offset"] == 0
+    assert first_result["limit"] == 1
+    assert first_result["next_offset"] == 1
+    assert first_result["truncated"] is True
+    assert first_result["rows"][0]["root_entity_id"] == first["id"]
+
+    second_page = client.post(
+        f"/api/v3/projects/{project_id}/semantic-datasets/{dataset.json()['id']}/query",
+        json={
+            "query_snapshot_id": first_result["query_snapshot_id"],
+            "offset": first_result["next_offset"],
+            "limit": 1,
+        },
+    )
+    assert second_page.status_code == 200, second_page.text
+    second_result = second_page.json()
+    assert second_result["total_rows"] == 2
+    assert second_result["offset"] == 1
+    assert second_result["next_offset"] is None
+    assert second_result["truncated"] is False
+    assert second_result["rows"][0]["root_entity_id"] != first["id"]

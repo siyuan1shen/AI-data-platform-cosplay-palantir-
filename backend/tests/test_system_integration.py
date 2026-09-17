@@ -12,6 +12,7 @@ from enterprise_insight_backend import connectors as connectors_module
 from enterprise_insight_backend import integration as integration_module
 from enterprise_insight_backend.agent_runtime import AgentRuntimeService
 from enterprise_insight_backend.connectors import ConnectorPage
+from enterprise_insight_backend.models import SourceSystemRow
 
 
 def _project(client: TestClient) -> str:
@@ -22,6 +23,219 @@ def _project(client: TestClient) -> str:
     project_id = project["id"]
     assert client.post(f"/api/v3/projects/{project_id}/ontology/default-pack").status_code == 200
     return project_id
+
+
+def test_source_credentials_are_encrypted_preserved_replaceable_and_clearable(
+    client: TestClient, monkeypatch, tmp_path
+) -> None:
+    project_id = _project(client)
+    secrets = {
+        "api_key": "api-key-do-not-store-plaintext",
+        "api_secret": "api-secret-do-not-store-plaintext",
+        "password": "password-do-not-store-plaintext",
+        "token": "token-do-not-store-plaintext",
+        "nested": {"client_secret": "nested-secret-do-not-store-plaintext"},
+    }
+    profile = {
+        "base_url": "https://erp.initial.invalid",
+        "timeout": 10,
+        **secrets,
+        "nested": {"region": "cn-east", **secrets["nested"]},
+    }
+    created = client.post(
+        f"/api/v3/projects/{project_id}/source-systems",
+        json={"name": "密钥存储测试", "kind": "REST", "connection_profile": profile},
+    )
+    assert created.status_code == 201, created.text
+    source = created.json()
+    source_id = source["id"]
+    assert source["configured_fields"] == sorted(profile)
+    assert all(value not in created.text for value in [
+        "api-key-do-not-store-plaintext",
+        "api-secret-do-not-store-plaintext",
+        "password-do-not-store-plaintext",
+        "token-do-not-store-plaintext",
+        "nested-secret-do-not-store-plaintext",
+    ])
+
+    with client.app.state.database.session_factory() as session:
+        row = session.get(SourceSystemRow, source_id)
+        assert row is not None
+        assert row.connection_profile == {
+            "base_url": "https://erp.initial.invalid",
+            "timeout": 10,
+            "nested": {"region": "cn-east"},
+        }
+        assert row.encrypted_connection_secrets
+        assert all(
+            secret not in row.encrypted_connection_secrets
+            for secret in (
+                "api-key-do-not-store-plaintext",
+                "api-secret-do-not-store-plaintext",
+                "password-do-not-store-plaintext",
+                "token-do-not-store-plaintext",
+                "nested-secret-do-not-store-plaintext",
+            )
+        )
+
+    database_bytes = (tmp_path / "test.db").read_bytes()
+    assert all(
+        secret.encode() not in database_bytes
+        for secret in (
+            "api-key-do-not-store-plaintext",
+            "api-secret-do-not-store-plaintext",
+            "password-do-not-store-plaintext",
+            "token-do-not-store-plaintext",
+            "nested-secret-do-not-store-plaintext",
+        )
+    )
+
+    captured_profiles: list[dict[str, object]] = []
+
+    class CapturingConnector:
+        def __init__(self, connector_profile: dict[str, object]) -> None:
+            self.profile = connector_profile
+
+        def test(self) -> tuple[bool, str]:
+            captured_profiles.append(self.profile)
+            return True, "模拟连接成功。"
+
+    monkeypatch.setattr(
+        integration_module,
+        "connector_for",
+        lambda _kind, connector_profile: CapturingConnector(connector_profile),
+    )
+
+    preserved = client.patch(
+        f"/api/v3/projects/{project_id}/source-systems/{source_id}",
+        json={
+            "expected_revision": 1,
+            "connection_profile": {
+                "base_url": "https://erp.updated.invalid",
+                "timeout": 25,
+                "nested": {"region": "cn-south"},
+            },
+        },
+    )
+    assert preserved.status_code == 200, preserved.text
+    assert client.post(
+        f"/api/v3/projects/{project_id}/source-systems/{source_id}/test"
+    ).status_code == 200
+    assert captured_profiles[-1] == {
+        "base_url": "https://erp.updated.invalid",
+        "timeout": 25,
+        "api_key": "api-key-do-not-store-plaintext",
+        "api_secret": "api-secret-do-not-store-plaintext",
+        "password": "password-do-not-store-plaintext",
+        "token": "token-do-not-store-plaintext",
+        "nested": {
+            "region": "cn-south",
+            "client_secret": "nested-secret-do-not-store-plaintext",
+        },
+    }
+
+    replaced = client.patch(
+        f"/api/v3/projects/{project_id}/source-systems/{source_id}",
+        json={
+            "expected_revision": 2,
+            "connection_profile": {
+                "base_url": "https://erp.replaced.invalid",
+                "api_key": "replacement-api-key",
+                "nested": {"region": "cn-west"},
+            },
+        },
+    )
+    assert replaced.status_code == 200, replaced.text
+    assert "replacement-api-key" not in replaced.text
+    assert client.post(
+        f"/api/v3/projects/{project_id}/source-systems/{source_id}/test"
+    ).status_code == 200
+    assert captured_profiles[-1]["api_key"] == "replacement-api-key"
+    assert captured_profiles[-1]["password"] == "password-do-not-store-plaintext"
+
+    cleared = client.patch(
+        f"/api/v3/projects/{project_id}/source-systems/{source_id}",
+        json={
+            "expected_revision": 3,
+            "connection_profile": {
+                "base_url": "https://erp.cleared.invalid",
+                "api_secret": None,
+                "password": "",
+                "token": None,
+                "nested": {"client_secret": ""},
+            },
+        },
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["configured_fields"] == ["api_key", "base_url", "nested"]
+    with client.app.state.database.session_factory() as session:
+        row = session.get(SourceSystemRow, source_id)
+        assert row is not None
+        assert row.encrypted_connection_secrets
+        assert "password-do-not-store-plaintext" not in row.encrypted_connection_secrets
+    assert "replacement-api-key" not in cleared.text
+
+
+def test_legacy_plaintext_source_secrets_migrate_on_read_and_connectors_decrypt(
+    client: TestClient, monkeypatch, tmp_path
+) -> None:
+    project_id = _project(client)
+    created = client.post(
+        f"/api/v3/projects/{project_id}/source-systems",
+        json={"name": "历史明文源", "kind": "REST", "connection_profile": {"base_url": "https://legacy.invalid"}},
+    )
+    assert created.status_code == 201, created.text
+    source_id = created.json()["id"]
+    legacy_profile = {
+        "base_url": "https://legacy.invalid",
+        "api_key": "legacy-api-key-never-echo",
+        "nested": {"password": "legacy-password-never-echo", "region": "west"},
+        "limit": 17,
+    }
+    with client.app.state.database.session_factory.begin() as session:
+        row = session.get(SourceSystemRow, source_id)
+        assert row is not None
+        row.connection_profile = legacy_profile
+        row.encrypted_connection_secrets = None
+
+    listing = client.get(f"/api/v3/projects/{project_id}/source-systems")
+    assert listing.status_code == 200, listing.text
+    assert "legacy-api-key-never-echo" not in listing.text
+    assert "legacy-password-never-echo" not in listing.text
+    assert listing.json()["items"][0]["configured_fields"] == sorted(legacy_profile)
+    with client.app.state.database.session_factory() as session:
+        row = session.get(SourceSystemRow, source_id)
+        assert row is not None
+        assert row.connection_profile == {
+            "base_url": "https://legacy.invalid",
+            "nested": {"region": "west"},
+            "limit": 17,
+        }
+        assert row.encrypted_connection_secrets
+
+    captured_profiles: list[dict[str, object]] = []
+
+    class CapturingConnector:
+        def __init__(self, connector_profile: dict[str, object]) -> None:
+            self.profile = connector_profile
+
+        def test(self) -> tuple[bool, str]:
+            captured_profiles.append(self.profile)
+            return True, "模拟连接成功。"
+
+    monkeypatch.setattr(
+        integration_module,
+        "connector_for",
+        lambda _kind, connector_profile: CapturingConnector(connector_profile),
+    )
+    tested = client.post(
+        f"/api/v3/projects/{project_id}/source-systems/{source_id}/test"
+    )
+    assert tested.status_code == 200, tested.text
+    assert captured_profiles[-1] == legacy_profile
+    database_bytes = (tmp_path / "test.db").read_bytes()
+    assert b"legacy-api-key-never-echo" not in database_bytes
+    assert b"legacy-password-never-echo" not in database_bytes
 
 
 def _approved_mapping(

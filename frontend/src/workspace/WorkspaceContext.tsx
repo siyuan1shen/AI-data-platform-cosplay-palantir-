@@ -39,8 +39,8 @@ export function WorkspaceProvider({ children }: PropsWithChildren) {
 
   const companiesQuery = useQuery({ queryKey: ["companies"], queryFn: api.listCompanies });
   const projectsQuery = useQuery({
-    queryKey: ["projects", selectedCompanyId],
-    queryFn: () => api.listProjects(selectedCompanyId || undefined),
+    queryKey: ["projects", selectedCompanyId, "company-workspace"],
+    queryFn: () => api.listProjects(selectedCompanyId || undefined, true),
     enabled: Boolean(selectedCompanyId),
   });
 

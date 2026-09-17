@@ -12,9 +12,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from enterprise_insight_backend.action_recovery_worker import ActionRecoveryWorker
 from enterprise_insight_backend.agent_worker import AgentWorker
 from enterprise_insight_backend.api import create_api_router
 from enterprise_insight_backend.config import Settings, get_settings
+from enterprise_insight_backend.control import ControlDatabase
+from enterprise_insight_backend.control_worker import ControlIndexWorker
 from enterprise_insight_backend.database import Database
 from enterprise_insight_backend.errors import (
     DomainError,
@@ -22,6 +25,12 @@ from enterprise_insight_backend.errors import (
     ErrorResponse,
     domain_error_handler,
 )
+from enterprise_insight_backend.lifecycle_worker import LifecycleWorker
+from enterprise_insight_backend.multi_store_backup import MultiStoreBackupService
+from enterprise_insight_backend.observations import ObservationDatabase
+from enterprise_insight_backend.potential import PotentialDatabase
+from enterprise_insight_backend.virtual_work_api import create_virtual_work_router
+from enterprise_insight_backend.work_observation_api import create_work_observation_router
 
 logger = logging.getLogger(__name__)
 
@@ -29,18 +38,53 @@ logger = logging.getLogger(__name__)
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or get_settings()
     database = Database(resolved)
+    observation_database = ObservationDatabase(resolved)
+    potential_database = PotentialDatabase(resolved.resolved_potential_database_url)
+    control_database = ControlDatabase(resolved.resolved_control_database_url)
+    backup_service = MultiStoreBackupService(
+        {
+            "formal": database.engine,
+            "observation": observation_database.engine,
+            "potential": potential_database.engine,
+            "control": control_database.engine,
+        },
+        application_version=resolved.app_version,
+        build_id=resolved.build_id,
+        auxiliary_files={"model-profile.key": resolved.data_dir / "model-profile.key"},
+        auxiliary_directories={"exports": resolved.data_dir / "exports"},
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         database.create_schema()
-        worker = AgentWorker(database, resolved)
+        observation_database.create_schema()
+        potential_database.create_schema()
+        control_database.create_schema()
+        worker = AgentWorker(
+            database, resolved, observation_database, potential_database, control_database
+        )
+        control_index_worker = ControlIndexWorker(database, control_database, resolved)
+        action_recovery_worker = ActionRecoveryWorker(database, resolved)
+        lifecycle_worker = LifecycleWorker(database, observation_database, resolved)
         if resolved.agent_worker_enabled:
             await worker.start()
+            await control_index_worker.start()
+            await action_recovery_worker.start()
+        if resolved.lifecycle_cleanup_enabled:
+            await lifecycle_worker.start()
         try:
             yield
         finally:
+            if resolved.lifecycle_cleanup_enabled:
+                await lifecycle_worker.stop()
             if resolved.agent_worker_enabled:
+                await action_recovery_worker.stop()
                 await worker.stop()
+                await control_index_worker.stop()
+            database.engine.dispose()
+            observation_database.engine.dispose()
+            potential_database.dispose()
+            control_database.dispose()
 
     application = FastAPI(
         title=resolved.app_name,
@@ -55,6 +99,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=f"{resolved.api_prefix}/redoc",
     )
     application.state.database = database
+    application.state.observation_database = observation_database
+    application.state.potential_database = potential_database
+    application.state.control_database = control_database
+    application.state.multi_store_backup = backup_service
     application.state.settings = resolved
     application.add_middleware(
         CORSMiddleware,
@@ -116,6 +164,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return response
 
     application.include_router(create_api_router(resolved), prefix=resolved.api_prefix)
+    application.include_router(create_virtual_work_router(), prefix=resolved.api_prefix)
+    application.include_router(
+        create_work_observation_router(), prefix=resolved.api_prefix
+    )
 
     frontend_dist = resolved.frontend_dist_dir
     if frontend_dist is not None and (frontend_dist / "index.html").is_file():

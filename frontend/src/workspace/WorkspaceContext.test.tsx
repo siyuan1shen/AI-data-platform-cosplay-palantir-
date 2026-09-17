@@ -99,7 +99,7 @@ describe("公司与项目上下文", () => {
     }));
   });
 
-  it("切换公司时清空旧项目并只加载新公司的项目", async () => {
+  it("切换公司时清空旧选择并只加载新公司的统一投影", async () => {
     renderWorkspace();
 
     await waitFor(() => {
@@ -115,7 +115,7 @@ describe("公司与项目上下文", () => {
     });
     expect(screen.getByRole("option").textContent).toBe("乙公司投影");
     expect(screen.queryByText("甲公司组织")).toBeNull();
-    expect(apiMocks.listProjects).toHaveBeenCalledWith("company-b");
+    expect(apiMocks.listProjects).toHaveBeenCalledWith("company-b", true);
   });
 
   it("恢复合法的公司和项目选择，非法项目不会跨公司保留", async () => {

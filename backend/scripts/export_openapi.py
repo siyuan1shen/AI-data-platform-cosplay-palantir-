@@ -14,7 +14,11 @@ def main() -> None:
     output = backend_root.parent / "contracts" / "openapi.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     settings = Settings(
-        data_dir=backend_root / ".contract-local", database_url="sqlite:///:memory:"
+        data_dir=backend_root / ".contract-local",
+        database_url="sqlite:///:memory:",
+        observation_database_url="sqlite:///:memory:",
+        potential_database_url="sqlite:///:memory:",
+        control_database_url="sqlite:///:memory:",
     )
     document = create_app(settings).openapi()
     with output.open("w", encoding="utf-8", newline="\n") as handle:

@@ -5,7 +5,7 @@ import type { ActionDefinition, ActionInvocation, ActionInvocationStatus, Action
 import { StatusMessage } from "../../components/StatusMessage";
 
 const statusLabels: Record<ActionInvocationStatus, string> = {
-  DRAFT: "待预演", DRY_RUN_COMPLETED: "预演完成", WAITING_APPROVAL: "待审批", APPROVED: "已审批", RUNNING: "执行中", SUCCEEDED: "已成功", FAILED: "失败", CANCELLED: "已取消", OBSERVING: "观察中", EFFECTIVE: "已验证有效", INEFFECTIVE: "已验证无效", ROLLED_BACK: "已回滚",
+  DRAFT: "待预演", DRY_RUN_COMPLETED: "预演完成", WAITING_APPROVAL: "待审批", APPROVED: "已审批", RUNNING: "执行中", SUCCEEDED: "已成功", OUTCOME_UNKNOWN: "结果未知", FAILED: "失败", CANCELLED: "已取消", OBSERVING: "观察中", EFFECTIVE: "已验证有效", INEFFECTIVE: "已验证无效", ROLLED_BACK: "已回滚",
 };
 const statusClass = (status: ActionInvocationStatus) => `status-${status.toLowerCase().replaceAll("_", "-")}`;
 const pollingStatuses = new Set<ActionInvocationStatus>(["RUNNING"]);

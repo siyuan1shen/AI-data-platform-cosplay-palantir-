@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import re
+from math import isfinite
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from enterprise_insight_backend.changes import ChangeSetService
 from enterprise_insight_backend.collaboration import ExplorationService
+from enterprise_insight_backend.config import Settings
+from enterprise_insight_backend.erpnext_task_bridge import (
+    ERPNextTaskBridgeClient,
+    ERPNextTaskOperation,
+    ERPNextTaskOperationReceipt,
+    ERPNextTaskOperationStatus,
+    ERPNextTaskOutcomeUnknown,
+)
 from enterprise_insight_backend.errors import DomainError
 from enterprise_insight_backend.evidence import EvidenceService
 from enterprise_insight_backend.integration import IntegrationService
@@ -20,13 +30,26 @@ from enterprise_insight_backend.models import (
     ActionLogRow,
     ActionObservationRow,
     AgentRunRow,
+    EntityRow,
     MetricDefinitionRow,
+    ObservationAssertionRow,
+    RawRecordValueRow,
+    RelationRow,
+    ScenarioRow,
+    SemanticMappingRow,
+    SourceIdentityRow,
 )
 from enterprise_insight_backend.observation_conflicts import ObservationConflictService
+from enterprise_insight_backend.observations import (
+    ManagementObservationRow,
+    ObservationDatabase,
+)
 from enterprise_insight_backend.ontology import OntologyService
 from enterprise_insight_backend.portfolio import PortfolioService
+from enterprise_insight_backend.potential import PotentialDatabase, PotentialRecordService
 from enterprise_insight_backend.projection import ProjectionService
 from enterprise_insight_backend.query_snapshots import QuerySnapshotService
+from enterprise_insight_backend.scenario_engine import ScenarioRunService
 from enterprise_insight_backend.schemas import (
     ActionApprovalRequest,
     ActionDefinitionCreate,
@@ -46,6 +69,7 @@ from enterprise_insight_backend.schemas import (
     CausalHypothesisCreate,
     ChangeSetCreate,
     DesignTradeoffCreate,
+    EnterpriseSummaryReadAction,
     EntityCreate,
     GraphNeighborhoodReadAction,
     GraphQuery,
@@ -55,13 +79,17 @@ from enterprise_insight_backend.schemas import (
     LearningCaseDraftFromActionCreate,
     LearningCaseDraftFromScenarioCreate,
     ManagementAnalysisRequest,
+    ManagementObservationSearchAction,
     MaterialFragmentsReadAction,
     MeetingRecordCreate,
     MetricObservationCreate,
     ObservationConflictResolve,
     ObservationConflictResolveAction,
+    PotentialRecordsSearchAction,
     RawBatchMaterializeAction,
     ScenarioCreate,
+    ScenarioSimulationAction,
+    ScenarioSimulationRequest,
     SemanticDatasetCreate,
     SemanticDatasetQuery,
     SemanticDatasetQueryAction,
@@ -72,10 +100,14 @@ from enterprise_insight_backend.schemas import (
     SemanticMappingSuggestionsReadAction,
     SourceIdentityBind,
     SourceIdentityBindAction,
+    SourceObservationsReadAction,
+    WorkObservationCompareAction,
+    WorkObservationReadAction,
 )
 from enterprise_insight_backend.semantic_datasets import SemanticDatasetService
 from enterprise_insight_backend.service_utils import json_ready, now_utc, require_revision
 from enterprise_insight_backend.tool_registry import get_tool_spec
+from enterprise_insight_backend.work_observation import WorkObservationService
 
 DEFAULT_ACTIONS: tuple[dict[str, Any], ...] = (
     {
@@ -101,6 +133,20 @@ DEFAULT_ACTIONS: tuple[dict[str, Any], ...] = (
             {"key": "goal", "name": "方案目标", "value_type": "STRING"},
         ],
         "effects": [{"kind": "CREATE", "resource": "SCENARIO", "trusted": False}],
+        "execution_mode": ActionExecutionMode.INTERNAL.value,
+        "risk_level": ActionRiskLevel.LOW.value,
+        "require_approval": False,
+    },
+    {
+        "key": "run_scenario_simulation",
+        "name": "运行情景推演",
+        "description": "使用显式输入运行可追溯的确定性情景计算，不修改企业正式数据。",
+        "parameters": [
+            {"key": "scenario_id", "name": "情景", "value_type": "UUID"},
+            {"key": "cases", "name": "基线与事件方案", "value_type": "JSON"},
+            {"key": "created_by", "name": "发起人", "value_type": "STRING", "required": False},
+        ],
+        "effects": [{"kind": "CREATE", "resource": "SCENARIO_RUN", "trusted": False}],
         "execution_mode": ActionExecutionMode.INTERNAL.value,
         "risk_level": ActionRiskLevel.LOW.value,
         "require_approval": False,
@@ -316,6 +362,116 @@ DEFAULT_ACTIONS: tuple[dict[str, Any], ...] = (
         "require_approval": False,
     },
     {
+        "key": "read_source_observations",
+        "name": "按来源标识读取 ERP 观测",
+        "description": (
+            "只按已导入来源记录标识读取已经物化的现实观测；复杂管理分析可留空标识读取"
+            "当前项目的已物化来源观测；不把尚未确认身份的来源记录提升为正式企业事实。"
+        ),
+        "parameters": [
+            {
+                "key": "source_record_keys",
+                "name": "来源记录标识（复杂分析可留空）",
+                "value_type": "JSON",
+            },
+            {
+                "key": "field_keys",
+                "name": "字段",
+                "value_type": "JSON",
+                "required": False,
+            },
+            {
+                "key": "source_assets",
+                "name": "数据资产",
+                "value_type": "JSON",
+                "required": False,
+            },
+            {"key": "limit", "name": "返回数量", "value_type": "INTEGER", "required": False},
+        ],
+        "effects": [{"kind": "READ", "resource": "SOURCE_OBSERVATIONS", "trusted": False}],
+        "execution_mode": ActionExecutionMode.INTERNAL.value,
+        "risk_level": ActionRiskLevel.LOW.value,
+        "require_approval": False,
+    },
+    {
+        "key": "search_management_observations",
+        "name": "检索管理观察",
+        "description": "按项目和关键词分页检索独立的管理观察库；内容始终是未验证线索。",
+        "parameters": [
+            {"key": "query", "name": "检索关键词", "value_type": "STRING"},
+            {"key": "offset", "name": "分页起点", "value_type": "INTEGER", "required": False},
+            {"key": "limit", "name": "每页数量", "value_type": "INTEGER", "required": False},
+        ],
+        "effects": [{"kind": "READ", "resource": "MANAGEMENT_OBSERVATIONS", "trusted": False}],
+        "execution_mode": ActionExecutionMode.INTERNAL.value,
+        "risk_level": ActionRiskLevel.LOW.value,
+        "require_approval": False,
+    },
+    {
+        "key": "search_potential_records",
+        "name": "检索潜在记录",
+        "description": "按项目检索经人确认但仍待验证的潜在记录，可选择纳入已拒绝或撤回的历史。",
+        "parameters": [
+            {"key": "query", "name": "检索关键词", "value_type": "STRING"},
+            {
+                "key": "include_history",
+                "name": "包含历史状态",
+                "value_type": "BOOLEAN",
+                "required": False,
+            },
+            {"key": "offset", "name": "分页起点", "value_type": "INTEGER", "required": False},
+            {"key": "limit", "name": "每页数量", "value_type": "INTEGER", "required": False},
+        ],
+        "effects": [{"kind": "READ", "resource": "POTENTIAL_RECORDS", "trusted": False}],
+        "execution_mode": ActionExecutionMode.INTERNAL.value,
+        "risk_level": ActionRiskLevel.LOW.value,
+        "require_approval": False,
+    },
+    {
+        "key": "work_observation.read",
+        "name": "读取工作观察模式",
+        "description": "读取已确认工作观察的活动片段和路径统计；不代表绩效或因果。",
+        "parameters": [
+            {"key": "analysis_id", "name": "分析", "value_type": "UUID", "required": False},
+            {"key": "employee_keys", "name": "员工筛选", "value_type": "JSON", "required": False},
+            {
+                "key": "include_segments",
+                "name": "包含片段",
+                "value_type": "BOOLEAN",
+                "required": False,
+            },
+            {"key": "limit", "name": "返回数量", "value_type": "INTEGER", "required": False},
+        ],
+        "effects": [{"kind": "READ", "resource": "WORK_OBSERVATION", "trusted": False}],
+        "execution_mode": ActionExecutionMode.INTERNAL.value,
+        "risk_level": ActionRiskLevel.LOW.value,
+        "require_approval": False,
+    },
+    {
+        "key": "work_observation.compare",
+        "name": "比较工作观察路径",
+        "description": "比较两组员工的已观察路径差异；不进行绩效排名和因果推断。",
+        "parameters": [
+            {"key": "analysis_id", "name": "分析", "value_type": "UUID"},
+            {"key": "left_employee_keys", "name": "左侧员工", "value_type": "JSON"},
+            {"key": "right_employee_keys", "name": "右侧员工", "value_type": "JSON"},
+        ],
+        "effects": [{"kind": "READ", "resource": "WORK_OBSERVATION_COMPARISON", "trusted": False}],
+        "execution_mode": ActionExecutionMode.INTERNAL.value,
+        "risk_level": ActionRiskLevel.LOW.value,
+        "require_approval": False,
+    },
+    {
+        "key": "read_enterprise_summary",
+        "name": "读取企业概览",
+        "description": "只读取当前正式企业投影的对象和关系数量，不读取观察库或潜在库。",
+        "parameters": [],
+        "effects": [{"kind": "READ", "resource": "ENTERPRISE_SUMMARY", "trusted": True}],
+        "execution_mode": ActionExecutionMode.INTERNAL.value,
+        "risk_level": ActionRiskLevel.LOW.value,
+        "require_approval": False,
+    },
+    {
         "key": "read_graph_neighborhood",
         "name": "按需读取图谱邻域",
         "description": (
@@ -438,15 +594,52 @@ DEFAULT_ACTIONS: tuple[dict[str, Any], ...] = (
     },
 )
 
+_ERPNEXT_TASK_ACTION_PREFIX = "erpnext.task."
+_ERPNEXT_TASK_ACTIONS = {
+    "erpnext.task.create": "create",
+    "erpnext.task.update": "update",
+    "erpnext.task.cancel": "cancel",
+}
+_ERPNEXT_TASK_CREATE_FIELDS = {
+    "subject",
+    "project",
+    "priority",
+    "description",
+    "exp_start_date",
+    "exp_end_date",
+    "expected_time",
+}
+_ERPNEXT_TASK_UPDATE_FIELDS = _ERPNEXT_TASK_CREATE_FIELDS | {"progress", "status"}
+_ERPNEXT_TASK_STRING_FIELDS = {
+    "subject",
+    "project",
+    "status",
+    "priority",
+    "description",
+    "exp_start_date",
+    "exp_end_date",
+    "task_name",
+    "expected_modified",
+}
+
 
 class ActionService:
     """Actions are the only execution boundary for Agent-initiated mutations."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        observation_database: ObservationDatabase | None = None,
+        potential_database: PotentialDatabase | None = None,
+        settings: Settings | None = None,
+    ) -> None:
         self.session = session
         self.portfolio = PortfolioService(session)
         self.ontology = OntologyService(session)
         self.projection = ProjectionService(session)
+        self.observation_database = observation_database
+        self.potential_database = potential_database
+        self.settings = settings
 
     def ensure_defaults(self, project_id: UUID | str) -> None:
         self.portfolio.require_project(project_id)
@@ -529,16 +722,16 @@ class ActionService:
                 status_code=409,
             )
         require_revision(row.revision, payload.expected_revision, resource="动作定义")
-        if row.execution_mode == ActionExecutionMode.CONNECTOR.value or (
-            payload.execution_mode == ActionExecutionMode.CONNECTOR
-        ):
-            raise DomainError(
-                "ACTION_CONNECTOR_UNAVAILABLE",
-                "当前版本只支持平台内部动作；外部系统动作连接器尚未安装。",
-                status_code=422,
-                details=[{"supported_execution_mode": ActionExecutionMode.INTERNAL.value}],
-            )
         values = payload.model_dump(exclude_unset=True, exclude={"expected_revision"})
+        mode = values.get("execution_mode", row.execution_mode)
+        mode = mode.value if hasattr(mode, "value") else mode
+        self._validate_connector_definition(
+            row.key,
+            mode,
+            values.get("target_type_key", row.target_type_key),
+            values.get("parameters", row.parameters),
+            values.get("require_approval", row.require_approval),
+        )
         if "target_type_key" in values:
             self._validate_target_type(project_id, values["target_type_key"])
         if "parameters" in values:
@@ -721,6 +914,7 @@ class ActionService:
                 )
             if row.status in {
                 ActionInvocationStatus.SUCCEEDED.value,
+                ActionInvocationStatus.OUTCOME_UNKNOWN.value,
                 ActionInvocationStatus.EFFECTIVE.value,
                 ActionInvocationStatus.ROLLED_BACK.value,
                 ActionInvocationStatus.RUNNING.value,
@@ -751,6 +945,27 @@ class ActionService:
         try:
             with self.session.begin_nested():
                 result = self._execute_handler(project_id, definition, row)
+        except ERPNextTaskOutcomeUnknown as exc:
+            row.error = {
+                "code": "ACTION_OUTCOME_UNKNOWN",
+                "message": (
+                    "ERPNext 可能已提交该动作，但当前无法确认。请先回查操作回执；"
+                    "不得重试或取消。"
+                ),
+                "details": [
+                    {
+                        "operation_id": str(exc.operation_id),
+                        "reason_code": exc.reason_code,
+                    }
+                ],
+            }
+            row.finished_at = now_utc()
+            self._transition(
+                row,
+                ActionInvocationStatus.OUTCOME_UNKNOWN.value,
+                actor=row.requested_by,
+                details=row.error,
+            )
         except DomainError as exc:
             row.error = {"code": exc.code, "message": exc.message, "details": exc.details}
             row.finished_at = now_utc()
@@ -784,6 +999,167 @@ class ActionService:
             )
         self.session.flush()
         return self._invocation_view(row)
+
+    def reconcile(
+        self, project_id: UUID, invocation_id: UUID
+    ) -> ActionInvocationView:
+        """Read the remote receipt for an uncertain operation; never replays it."""
+        row = self.require_invocation(project_id, invocation_id)
+        if row.status not in {
+            ActionInvocationStatus.RUNNING.value,
+            ActionInvocationStatus.OUTCOME_UNKNOWN.value,
+        }:
+            raise DomainError(
+                "ACTION_NOT_OUTCOME_UNKNOWN",
+                "只有运行中或结果不确定的外部动作可以回查。",
+                status_code=409,
+            )
+        definition = self.session.get(ActionDefinitionRow, row.action_definition_id)
+        if definition is None:
+            raise DomainError("ACTION_DEFINITION_NOT_FOUND", "动作定义不存在。", status_code=404)
+        if definition.execution_mode != ActionExecutionMode.CONNECTOR.value:
+            raise DomainError(
+                "ACTION_RECONCILIATION_UNAVAILABLE",
+                "该动作不是 ERPNext 外部连接器动作。",
+                status_code=409,
+            )
+        source_id, operation = self._build_erpnext_task_operation(
+            definition,
+            row.input,
+            operation_id=UUID(row.id),
+            target_entity_ids=[UUID(item) for item in row.target_entity_ids],
+        )
+        profile = IntegrationService(self.session, self.settings).connector_profile(
+            project_id, source_id
+        )
+        receipt = ERPNextTaskBridgeClient(cast(dict[str, Any], profile)).reconcile(
+            operation.operation_id
+        )
+        if receipt.operation_id != operation.operation_id:
+            raise DomainError(
+                "ERPNEXT_TASK_RECEIPT_ID_MISMATCH",
+                "回查回执的 operation_id 与原始动作不一致；状态保持不确定。",
+                status_code=409,
+            )
+        if receipt.status == ERPNextTaskOperationStatus.NOT_FOUND:
+            message = (
+                "ERPNext 当前未返回该 operation_id 的回执。这不能证明原请求未提交，"
+                "系统不会重放；请先在 ERPNext 核实后再处理。"
+            )
+            row.error = {
+                "code": "ACTION_OUTCOME_STILL_UNKNOWN",
+                "message": message,
+                "details": [
+                    {"operation_id": str(operation.operation_id), "replay_allowed": False}
+                ],
+            }
+            self._log(
+                row.project_id,
+                invocation_id=row.id,
+                event_type="REMOTE_RECONCILIATION_NOT_FOUND",
+                actor=row.requested_by,
+                from_status=row.status,
+                to_status=row.status,
+                details={"operation_id": str(operation.operation_id), "replay_allowed": False},
+            )
+            self.session.flush()
+            return self._invocation_view(row)
+        if receipt.status in {
+            ERPNextTaskOperationStatus.IN_PROGRESS,
+            ERPNextTaskOperationStatus.UNKNOWN,
+        }:
+            row.error = {
+                "code": "ACTION_OUTCOME_STILL_UNKNOWN",
+                "message": "ERPNext 操作仍在处理或未能确认；不得重试或取消。",
+                "details": [
+                    {
+                        "operation_id": str(operation.operation_id),
+                        "remote_status": receipt.status.value,
+                        "replay_allowed": False,
+                    }
+                ],
+            }
+            self._log(
+                row.project_id,
+                invocation_id=row.id,
+                event_type="REMOTE_RECONCILIATION_PENDING",
+                actor=row.requested_by,
+                from_status=row.status,
+                to_status=row.status,
+                details={
+                    "operation_id": str(operation.operation_id),
+                    "remote_status": receipt.status.value,
+                },
+            )
+            self.session.flush()
+            return self._invocation_view(row)
+        if receipt.payload_sha256 != operation.payload_sha256:
+            raise DomainError(
+                "ERPNEXT_TASK_RECEIPT_HASH_MISMATCH",
+                "回查回执内容哈希与原始请求不一致；状态保持不确定。",
+                status_code=409,
+            )
+        if receipt.status == ERPNextTaskOperationStatus.COMMITTED:
+            row.result = self._erpnext_task_result(operation, receipt)
+            row.error = None
+            row.finished_at = now_utc()
+            self._transition(
+                row,
+                ActionInvocationStatus.SUCCEEDED.value,
+                actor=row.requested_by,
+                details=row.result,
+            )
+        elif receipt.status in {
+            ERPNextTaskOperationStatus.CONFLICT,
+            ERPNextTaskOperationStatus.REJECTED,
+            ERPNextTaskOperationStatus.FAILED,
+        }:
+            row.error = {
+                "code": f"ERPNEXT_TASK_{receipt.status.value}",
+                "message": receipt.message or "ERPNext 回执确认该动作未提交。",
+                "details": [{"operation_id": str(operation.operation_id)}],
+            }
+            row.finished_at = now_utc()
+            self._transition(
+                row,
+                ActionInvocationStatus.FAILED.value,
+                actor=row.requested_by,
+                details=row.error,
+            )
+        else:
+            row.error = {
+                "code": "ACTION_OUTCOME_STILL_UNKNOWN",
+                "message": "ERPNext 回执仍未确认提交结果；不得重试或取消。",
+                "details": [
+                    {
+                        "operation_id": str(operation.operation_id),
+                        "remote_status": receipt.status.value,
+                        "replay_allowed": False,
+                    }
+                ],
+            }
+        self.session.flush()
+        return self._invocation_view(row)
+
+    def record_reconciliation_failure(
+        self, project_id: UUID, invocation_id: UUID, *, error_code: str
+    ) -> None:
+        """Audit and throttle a failed background receipt read without changing outcome."""
+        row = self.require_invocation(project_id, invocation_id)
+        if row.status not in {
+            ActionInvocationStatus.RUNNING.value,
+            ActionInvocationStatus.OUTCOME_UNKNOWN.value,
+        }:
+            return
+        safe_code = error_code if re.fullmatch(r"[A-Z0-9_]{1,64}", error_code) else "UNEXPECTED"
+        row.updated_at = now_utc()
+        self._log_state(
+            row,
+            "REMOTE_RECONCILIATION_FAILED",
+            actor="action-recovery-worker",
+            details={"error_code": safe_code, "replay_allowed": False},
+        )
+        self.session.flush()
 
     def _claim_invocation(
         self, project_id: UUID, invocation_id: UUID
@@ -854,6 +1230,12 @@ class ActionService:
             ActionInvocationStatus.ROLLED_BACK.value,
         }:
             raise DomainError("ACTION_ALREADY_FINISHED", "已完成的动作不能取消。", status_code=409)
+        if row.status == ActionInvocationStatus.OUTCOME_UNKNOWN.value:
+            raise DomainError(
+                "ACTION_OUTCOME_UNKNOWN_CANNOT_CANCEL",
+                "外部动作结果不确定，不能取消或重放；请先回查 ERPNext 回执。",
+                status_code=409,
+            )
         if row.status == ActionInvocationStatus.RUNNING.value:
             raise DomainError(
                 "ACTION_ALREADY_RUNNING", "运行中的动作不能直接取消。", status_code=409
@@ -1026,13 +1408,13 @@ class ActionService:
         self, project_id: UUID, payload: ActionDefinitionCreate
     ) -> None:
         self._validate_target_type(project_id, payload.target_type_key)
-        if payload.execution_mode == ActionExecutionMode.CONNECTOR:
-            raise DomainError(
-                "ACTION_CONNECTOR_UNAVAILABLE",
-                "当前版本只支持平台内部动作；外部系统动作连接器尚未安装。",
-                status_code=422,
-                details=[{"supported_execution_mode": ActionExecutionMode.INTERNAL.value}],
-            )
+        self._validate_connector_definition(
+            payload.key,
+            payload.execution_mode.value,
+            payload.target_type_key,
+            [item.model_dump(mode="json") for item in payload.parameters],
+            payload.require_approval,
+        )
         keys = [item.key for item in payload.parameters]
         if len(keys) != len(set(keys)):
             raise DomainError(
@@ -1049,6 +1431,43 @@ class ActionService:
                 details=[{"action_key": payload.key}],
             )
 
+    @staticmethod
+    def _validate_connector_definition(
+        key: str,
+        execution_mode: str,
+        target_type_key: str | None,
+        parameters: list[dict[str, Any]],
+        require_approval: bool,
+    ) -> None:
+        is_connector_key = key in _ERPNEXT_TASK_ACTIONS
+        if execution_mode != ActionExecutionMode.CONNECTOR.value:
+            if is_connector_key:
+                raise DomainError(
+                    "ACTION_CONNECTOR_CONFIGURATION_INVALID",
+                    "ERPNext Task 固定动作必须使用 CONNECTOR 执行模式。",
+                    status_code=422,
+                )
+            return
+        if not is_connector_key:
+            raise DomainError(
+                "ACTION_CONNECTOR_UNAVAILABLE",
+                "只允许注册固定的 erpnext.task.create/update/cancel 连接器动作。",
+                status_code=422,
+                details=[{"supported_action_keys": sorted(_ERPNEXT_TASK_ACTIONS)}],
+            )
+        if not require_approval:
+            raise DomainError(
+                "ACTION_CONNECTOR_APPROVAL_REQUIRED",
+                "所有 ERPNext 外部动作都必须经过人工审批。",
+                status_code=422,
+            )
+        if target_type_key is not None or parameters:
+            raise DomainError(
+                "ACTION_CONNECTOR_CONFIGURATION_INVALID",
+                "ERPNext Task 动作使用内置字段白名单，不接受自定义目标类型或参数定义。",
+                status_code=422,
+            )
+
     def _validate_target_type(self, project_id: UUID, type_key: str | None) -> None:
         if type_key is None:
             return
@@ -1060,6 +1479,14 @@ class ActionService:
         input_data: dict[str, Any],
         target_entity_ids: list[UUID],
     ) -> None:
+        if definition.execution_mode == ActionExecutionMode.CONNECTOR.value:
+            self._build_erpnext_task_operation(
+                definition,
+                input_data,
+                operation_id=UUID(int=0),
+                target_entity_ids=target_entity_ids,
+            )
+            return
         parameters = definition.parameters or []
         known_keys = {item["key"] for item in parameters}
         known_keys.update(self._handled_input_keys(definition.key))
@@ -1113,10 +1540,339 @@ class ActionService:
                 details=[{"key": key, "expected": value_type}],
             )
 
+    def _build_erpnext_task_operation(
+        self,
+        definition: ActionDefinitionRow,
+        input_data: dict[str, Any],
+        *,
+        operation_id: UUID,
+        target_entity_ids: list[UUID],
+    ) -> tuple[UUID, ERPNextTaskOperation]:
+        action = _ERPNEXT_TASK_ACTIONS.get(definition.key)
+        if (
+            definition.execution_mode != ActionExecutionMode.CONNECTOR.value
+            or action is None
+        ):
+            raise DomainError(
+                "ACTION_CONNECTOR_UNAVAILABLE",
+                "只允许执行固定的 ERPNext Task create/update/cancel 动作。",
+                status_code=422,
+            )
+        if target_entity_ids:
+            raise DomainError(
+                "ERPNEXT_TASK_TARGETS_UNSUPPORTED",
+                "ERPNext Task 动作不能附带任意本体实体目标。",
+                status_code=422,
+            )
+
+        common = {"source_system_id"}
+        if action == "create":
+            allowed = common | _ERPNEXT_TASK_CREATE_FIELDS
+            required = {"source_system_id", "subject", "project"}
+        elif action == "update":
+            allowed = common | _ERPNEXT_TASK_UPDATE_FIELDS | {
+                "task_name",
+                "expected_modified",
+            }
+            required = {"source_system_id", "task_name", "expected_modified"}
+        else:
+            allowed = common | {"task_name", "expected_modified"}
+            required = allowed
+
+        missing = sorted(required - set(input_data))
+        if missing:
+            raise DomainError(
+                "ERPNEXT_TASK_REQUIRED_FIELDS_MISSING",
+                "ERPNext Task 动作缺少必填字段。",
+                status_code=422,
+                details=[{"fields": missing}],
+            )
+        unknown = sorted(set(input_data) - allowed)
+        if unknown:
+            raise DomainError(
+                "ERPNEXT_TASK_FIELDS_UNSUPPORTED",
+                "ERPNext Task 动作包含未允许的字段。",
+                status_code=422,
+                details=[{"fields": unknown}],
+            )
+
+        try:
+            source_id = UUID(str(input_data["source_system_id"]))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise DomainError(
+                "ERPNEXT_TASK_SOURCE_ID_INVALID",
+                "source_system_id 必须是有效的数据源标识。",
+                status_code=422,
+            ) from exc
+        integration = IntegrationService(self.session, self.settings)
+        source = integration.require_source(UUID(definition.project_id), source_id)
+        if source.kind != "ERP":
+            raise DomainError(
+                "ACTION_ERP_SOURCE_REQUIRED",
+                "ERPNext Task 动作只能使用当前项目内 kind=ERP 的数据源。",
+                status_code=422,
+                details=[{"source_system_id": str(source_id), "source_kind": source.kind}],
+            )
+
+        normalized: dict[str, Any] = {}
+        max_lengths = {
+            "subject": 140,
+            "project": 140,
+            "status": 32,
+            "priority": 32,
+            "description": 5000,
+            "exp_start_date": 10,
+            "exp_end_date": 10,
+            "task_name": 140,
+            "expected_modified": 64,
+        }
+        for key in _ERPNEXT_TASK_STRING_FIELDS:
+            if key not in input_data:
+                continue
+            value = input_data[key]
+            if not isinstance(value, str):
+                raise DomainError(
+                    "ERPNEXT_TASK_FIELD_TYPE_INVALID",
+                    f"ERPNext Task 字段 {key} 必须是文本。",
+                    status_code=422,
+                    details=[{"field": key, "expected": "string"}],
+                )
+            value = value.strip()
+            if key in required and not value:
+                raise DomainError(
+                    "ERPNEXT_TASK_REQUIRED_FIELDS_MISSING",
+                    f"ERPNext Task 字段 {key} 不能为空。",
+                    status_code=422,
+                    details=[{"fields": [key]}],
+                )
+            if len(value) > max_lengths[key]:
+                raise DomainError(
+                    "ERPNEXT_TASK_FIELD_TOO_LONG",
+                    f"ERPNext Task 字段 {key} 超出长度限制。",
+                    status_code=422,
+                    details=[{"field": key, "max_length": max_lengths[key]}],
+                )
+            normalized[key] = value
+
+        for key in ("expected_time", "progress"):
+            if key not in input_data:
+                continue
+            value = input_data[key]
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise DomainError(
+                    "ERPNEXT_TASK_FIELD_TYPE_INVALID",
+                    f"ERPNext Task 字段 {key} 必须是数字。",
+                    status_code=422,
+                    details=[{"field": key, "expected": "number"}],
+                )
+            if not isfinite(value) or value < 0 or (key == "progress" and value > 100):
+                raise DomainError(
+                    "ERPNEXT_TASK_FIELD_VALUE_INVALID",
+                    f"ERPNext Task 字段 {key} 超出允许范围。",
+                    status_code=422,
+                    details=[{"field": key}],
+                )
+            normalized[key] = value
+
+        remote_payload = {
+            key: value
+            for key, value in normalized.items()
+            if key not in {"expected_modified"}
+        }
+        operation = ERPNextTaskOperation(
+            operation_id=operation_id,
+            action=action,
+            payload=remote_payload,
+            expected_modified=normalized.get("expected_modified"),
+        )
+        return source_id, operation
+
+    @staticmethod
+    def _erpnext_task_result(
+        operation: ERPNextTaskOperation,
+        receipt: ERPNextTaskOperationReceipt,
+    ) -> dict[str, Any]:
+        return {
+            "connector": "erpnext.task",
+            "operation_id": str(operation.operation_id),
+            "action": operation.action,
+            "status": receipt.status.value,
+            "payload_sha256": receipt.payload_sha256,
+            "task_name": receipt.task_name,
+            "task_modified": receipt.task_modified,
+            "task": receipt.task,
+        }
+
     @staticmethod
     def _handled_input_keys(action_key: str) -> set[str]:
         spec = get_tool_spec(action_key)
         return spec.input_keys if spec is not None else set()
+
+    @staticmethod
+    def _search_terms(query: str) -> list[str]:
+        lowered = query.casefold()
+        terms = re.findall(r"[a-z0-9_]+", lowered)
+        for run in re.findall(r"[\u3400-\u9fff]+", lowered):
+            if len(run) <= 3:
+                terms.append(run)
+            else:
+                terms.extend(run[index : index + 2] for index in range(len(run) - 1))
+                terms.extend(run[index : index + 3] for index in range(len(run) - 2))
+        return list(dict.fromkeys(item for item in terms if item))
+
+    @classmethod
+    def _search_score(cls, text: str, query: str) -> int:
+        terms = cls._search_terms(query)
+        normalized_text = text.casefold()
+        compact_query = "".join(query.casefold().split())
+        score = 4 if compact_query and compact_query in "".join(normalized_text.split()) else 0
+        return score + sum(2 if len(term) > 1 else 1 for term in terms if term in normalized_text)
+
+    def _search_management_observations(
+        self, project_id: UUID, payload: ManagementObservationSearchAction
+    ) -> dict[str, Any]:
+        if self.observation_database is None:
+            raise DomainError(
+                "OBSERVATION_STORE_UNAVAILABLE",
+                "管理观察库当前不可用，检索未执行。",
+                status_code=503,
+            )
+        project = self.portfolio.require_project(project_id)
+        scan_limit = 500
+        base = select(ManagementObservationRow).where(
+            ManagementObservationRow.company_id == project.company_id,
+            ManagementObservationRow.project_id == str(project_id),
+            ManagementObservationRow.status == "ACTIVE",
+        )
+        with self.observation_database.session_factory() as observation_session:
+            available = observation_session.scalar(
+                select(func.count()).select_from(base.subquery())
+            ) or 0
+            rows = list(
+                observation_session.scalars(
+                    base.order_by(
+                        ManagementObservationRow.created_at.desc(),
+                        ManagementObservationRow.id,
+                    ).offset(payload.scan_offset).limit(scan_limit)
+                ).all()
+            )
+        scan_truncated = payload.scan_offset + len(rows) < available
+        ranked = [
+            (index, row, self._search_score(f"{row.title}\n{row.content}", payload.query))
+            for index, row in enumerate(rows)
+        ]
+        matches = [(index, row, score) for index, row, score in ranked if score > 0]
+        matches.sort(key=lambda item: (-item[2], item[0]))
+        page = matches[payload.offset : payload.offset + payload.limit]
+        return {
+            "resource": "MANAGEMENT_OBSERVATIONS",
+            "query": payload.query,
+            "available": available,
+            "scan_offset": payload.scan_offset,
+            "scanned": len(rows),
+            "next_scan_offset": payload.scan_offset + len(rows) if scan_truncated else None,
+            "matching_in_scanned": len(matches),
+            "returned": len(page),
+            "offset": payload.offset,
+            "limit": payload.limit,
+            "truncated": scan_truncated or len(matches) > payload.offset + len(page),
+            "matching_count_is_lower_bound": scan_truncated,
+            "ranking_scope": "CURRENT_SCAN_WINDOW",
+            "items": [
+                {
+                    "id": row.id,
+                    "kind": row.kind,
+                    "title": row.title,
+                    "content_excerpt": row.content[:1800],
+                    "content_truncated": len(row.content) > 1800,
+                    "occurred_at": row.occurred_at,
+                    "recorded_at": row.created_at,
+                    "submitted_by": row.submitted_by,
+                    "revision": row.revision,
+                    "trust": "UNVERIFIED_MANAGEMENT_OBSERVATION",
+                    "source_store": "management_observations",
+                }
+                for _, row, _score in page
+            ],
+            "trust_note": "观察是待核实线索，不能当作正式事实。",
+        }
+
+    def _search_potential_records(
+        self, project_id: UUID, payload: PotentialRecordsSearchAction
+    ) -> dict[str, Any]:
+        if self.potential_database is None:
+            raise DomainError(
+                "POTENTIAL_STORE_UNAVAILABLE",
+                "潜在库当前不可用，检索未执行。",
+                status_code=503,
+            )
+        project = self.portfolio.require_project(project_id)
+        page = PotentialRecordService(self.potential_database).list_records(
+            company_id=UUID(project.company_id),
+            project_id=project_id,
+            include_history=payload.include_history,
+            limit=500,
+            offset=payload.scan_offset,
+        )
+        ranked = [
+            (
+                index,
+                item,
+                self._search_score(
+                    "\n".join(
+                        [item.claim, item.applicability_scope, item.task_source]
+                        + [evidence.excerpt for evidence in item.supporting_evidence]
+                        + [evidence.excerpt for evidence in item.counterevidence]
+                    ),
+                    payload.query,
+                ),
+            )
+            for index, item in enumerate(page.items)
+        ]
+        matches = [(index, item, score) for index, item, score in ranked if score > 0]
+        matches.sort(key=lambda item: (-item[2], item[0]))
+        selected = matches[payload.offset : payload.offset + payload.limit]
+        scan_truncated = payload.scan_offset + len(page.items) < page.total
+        return {
+            "resource": "POTENTIAL_RECORDS",
+            "query": payload.query,
+            "include_history": payload.include_history,
+            "available": page.total,
+            "scan_offset": payload.scan_offset,
+            "scanned": len(page.items),
+            "next_scan_offset": payload.scan_offset + len(page.items) if scan_truncated else None,
+            "matching_in_scanned": len(matches),
+            "returned": len(selected),
+            "offset": payload.offset,
+            "limit": payload.limit,
+            "truncated": scan_truncated or len(matches) > payload.offset + len(selected),
+            "matching_count_is_lower_bound": scan_truncated,
+            "ranking_scope": "CURRENT_SCAN_WINDOW",
+            "items": [
+                {
+                    "id": str(item.id),
+                    "potential_type": item.potential_type.value,
+                    "claim": item.claim,
+                    "applicability_scope": item.applicability_scope,
+                    "task_source": item.task_source,
+                    "supporting_evidence": [
+                        evidence.model_dump(mode="json")
+                        for evidence in item.supporting_evidence[:5]
+                    ],
+                    "counterevidence": [
+                        evidence.model_dump(mode="json") for evidence in item.counterevidence[:5]
+                    ],
+                    "human_status": item.human_status.value,
+                    "evidence_status": item.evidence_status.value,
+                    "version": item.version,
+                    "updated_at": item.updated_at,
+                    "trust": "HUMAN_CONFIRMED_UNVERIFIED_POTENTIAL",
+                    "source_store": "potential_records",
+                }
+                for _, item, _score in selected
+            ],
+            "trust_note": "潜在记录经人确认，但并未因此被证明；核对证据状态和反例。",
+        }
 
     def _read_graph_neighborhood(
         self, row: ActionInvocationRow, payload: GraphNeighborhoodReadAction
@@ -1138,6 +1894,266 @@ class ActionService:
                 )
         return self.projection.graph(project_id, query)
 
+    def _read_enterprise_summary(
+        self, row: ActionInvocationRow, payload: EnterpriseSummaryReadAction
+    ) -> dict[str, Any]:
+        """Read bounded counts from the formal model for a company-level query."""
+
+        del payload
+        project_id = UUID(row.project_id)
+        project = self.portfolio.require_project(project_id)
+        snapshot_id: UUID | None = None
+        if row.source_agent_run_id:
+            run = self.session.get(AgentRunRow, row.source_agent_run_id)
+            snapshot_value = (run.context_manifest or {}).get("query_snapshot_id") if run else None
+            if snapshot_value:
+                snapshot_id = UUID(str(snapshot_value))
+
+        if snapshot_id is not None:
+            graph = QuerySnapshotService(self.session).graph(
+                project_id,
+                snapshot_id,
+                GraphQuery(include_observations=False),
+            )
+            entity_counts: dict[str, int] = {}
+            for entity in graph.entities:
+                entity_counts[entity.type_key] = entity_counts.get(entity.type_key, 0) + 1
+            relation_counts: dict[str, int] = {}
+            for relation in graph.relations:
+                relation_counts[relation.type_key] = relation_counts.get(relation.type_key, 0) + 1
+            model_revision = graph.revision
+            source = "formal_query_snapshot"
+        else:
+            entity_rows = self.session.execute(
+                select(EntityRow.type_key, func.count(EntityRow.id))
+                .where(
+                    EntityRow.project_id == str(project_id),
+                    EntityRow.status != "RETIRED",
+                    EntityRow.design_membership == "MODELED",
+                )
+                .group_by(EntityRow.type_key)
+                .order_by(EntityRow.type_key)
+            ).all()
+            relation_rows = self.session.execute(
+                select(RelationRow.type_key, func.count(RelationRow.id))
+                .where(
+                    RelationRow.project_id == str(project_id),
+                    RelationRow.status != "RETIRED",
+                )
+                .group_by(RelationRow.type_key)
+                .order_by(RelationRow.type_key)
+            ).all()
+            entity_counts = {str(type_key): int(count) for type_key, count in entity_rows}
+            relation_counts = {str(type_key): int(count) for type_key, count in relation_rows}
+            model_revision = project.revision
+            source = "formal_current_model"
+
+        return {
+            "resource": "ENTERPRISE_SUMMARY",
+            "company_id": project.company_id,
+            "project_id": project.id,
+            "model_revision": model_revision,
+            "source": source,
+            "entity_count": sum(entity_counts.values()),
+            "entities_by_type": entity_counts,
+            "relation_count": sum(relation_counts.values()),
+            "relations_by_type": relation_counts,
+            "trusted": True,
+            "trust_note": "只统计正式企业投影，不包含管理观察库、潜在库或工作观察。",
+        }
+
+    def _read_source_observations(
+        self, row: ActionInvocationRow, payload: SourceObservationsReadAction
+    ) -> dict[str, Any]:
+        """Read materialized source observations without promoting source identities.
+
+        This is intentionally a narrow reader for management queries. It accepts
+        exact source record keys and, for cross-table lookups, matches a requested
+        key against scalar values in the immutable raw row. It never resolves an
+        identity, changes a mapping, or returns a source row as a formal fact.
+        """
+
+        project_id = str(row.project_id)
+        requested_keys = {
+            str(value).strip().casefold()
+            for value in payload.source_record_keys
+            if str(value).strip()
+        }
+        requested_fields = [
+            str(value).strip()
+            for value in payload.field_keys
+            if str(value).strip()
+        ]
+        requested_assets = [
+            str(value).strip()
+            for value in payload.source_assets
+            if str(value).strip()
+        ]
+
+        # Push every known predicate into SQL.  The previous implementation
+        # loaded every active assertion and then filtered it in Python, so a
+        # small exact lookup still cost a project-wide scan.
+        assertion_conditions = [
+            ObservationAssertionRow.project_id == project_id,
+            ObservationAssertionRow.status == "ACTIVE",
+        ]
+        if requested_assets:
+            assertion_conditions.append(ObservationAssertionRow.source_asset.in_(requested_assets))
+        if requested_fields:
+            assertion_conditions.append(ObservationAssertionRow.field_key.in_(requested_fields))
+        if requested_keys:
+            related_record_ids = select(RawRecordValueRow.raw_record_id).where(
+                RawRecordValueRow.project_id == project_id,
+                RawRecordValueRow.value_text.in_(requested_keys),
+            )
+            assertion_conditions.append(
+                or_(
+                    ObservationAssertionRow.source_record_key.in_(
+                        list(payload.source_record_keys)
+                    ),
+                    ObservationAssertionRow.raw_record_id.in_(related_record_ids),
+                )
+            )
+
+        assertion_rows = list(
+            self.session.scalars(
+                select(ObservationAssertionRow)
+                .where(*assertion_conditions)
+                .order_by(
+                    ObservationAssertionRow.observed_at.desc(),
+                    ObservationAssertionRow.created_at.desc(),
+                    ObservationAssertionRow.id.desc(),
+                )
+                .limit(payload.limit + 1)
+            ).all()
+        )
+        truncated = len(assertion_rows) > payload.limit
+        assertions = assertion_rows[: payload.limit]
+        identity_ids = {
+            str(item.source_identity_id)
+            for item in assertions
+            if item.source_identity_id
+        }
+        mapping_ids = {
+            str(item.semantic_mapping_id)
+            for item in assertions
+            if item.semantic_mapping_id
+        }
+        identities = self.session.scalars(
+            select(SourceIdentityRow).where(
+                SourceIdentityRow.project_id == project_id,
+                SourceIdentityRow.id.in_(identity_ids),
+            )
+        ).all() if identity_ids else []
+        identities_by_id = {str(item.id): item for item in identities}
+        mappings_by_id = {
+            str(item.id): item
+            for item in self.session.scalars(
+                select(SemanticMappingRow).where(
+                    SemanticMappingRow.project_id == project_id,
+                    SemanticMappingRow.id.in_(mapping_ids),
+                )
+            ).all()
+        }
+        raw_value_by_record: dict[str, set[str]] = {}
+        if requested_keys:
+            raw_ids = {
+                str(item.raw_record_id)
+                for item in assertions
+                if item.raw_record_id is not None
+            }
+            if raw_ids:
+                for item in self.session.scalars(
+                    select(RawRecordValueRow).where(
+                        RawRecordValueRow.project_id == project_id,
+                        RawRecordValueRow.raw_record_id.in_(raw_ids),
+                        RawRecordValueRow.value_text.in_(requested_keys),
+                    )
+                ).all():
+                    raw_value_by_record.setdefault(str(item.raw_record_id), set()).add(
+                        item.value_text
+                    )
+
+        rows: list[dict[str, Any]] = []
+        unresolved_identity_count = 0
+        for assertion in assertions:
+            assertion_key = str(assertion.source_record_key).strip().casefold()
+            match_kind: str | None = None
+            matched_key: str | None = None
+            if not requested_keys:
+                match_kind = "ALL_SOURCE_OBSERVATIONS"
+            elif assertion_key in requested_keys:
+                match_kind = "SOURCE_RECORD_KEY"
+                matched_key = assertion.source_record_key
+            elif str(assertion.raw_record_id) in raw_value_by_record:
+                match_kind = "RELATED_RECORD_VALUE"
+                matched_key = next(
+                    (
+                        original
+                        for original in payload.source_record_keys
+                        if str(original).strip().casefold()
+                        in raw_value_by_record[str(assertion.raw_record_id)]
+                    ),
+                    None,
+                )
+            if match_kind is None:
+                continue
+
+            identity = identities_by_id.get(str(assertion.source_identity_id))
+            mapping = mappings_by_id.get(str(assertion.semantic_mapping_id))
+            identity_status = identity.status if identity is not None else "UNKNOWN"
+            mapping_status = mapping.status if mapping is not None else "UNKNOWN"
+            trusted = identity_status == "BOUND" and mapping_status == "APPROVED"
+            if identity_status != "BOUND":
+                unresolved_identity_count += 1
+            rows.append(
+                {
+                    "source_asset": assertion.source_asset,
+                    "source_record_key": assertion.source_record_key,
+                    "field_key": assertion.field_key,
+                    "value": assertion.value,
+                    "observed_at": assertion.observed_at,
+                    "target_type_key": identity.target_type_key if identity else None,
+                    "entity_id": identity.entity_id if trusted and identity else None,
+                    "identity_status": identity_status,
+                    "mapping_status": mapping_status,
+                    "match_kind": match_kind,
+                    "matched_source_record_key": matched_key,
+                    "trusted": trusted,
+                }
+            )
+            if len(rows) >= payload.limit:
+                break
+
+        warnings: list[str] = []
+        if unresolved_identity_count:
+            warnings.append(
+                "部分来源身份尚未绑定到正式企业对象；结果仅作为已物化来源观测。"
+            )
+        if not rows:
+            warnings.append(
+                "没有找到与来源记录标识和字段筛选同时匹配的已物化观测。"
+                if requested_keys
+                else "当前项目没有符合字段筛选的已物化来源观测。"
+            )
+        return json_ready(
+            {
+                "resource": "SOURCE_OBSERVATIONS",
+                "requested_source_record_keys": list(payload.source_record_keys),
+                "requested_field_keys": list(payload.field_keys),
+                "requested_source_assets": list(payload.source_assets),
+                "rows": rows,
+                "returned": len(rows),
+                "truncated": truncated,
+                "warnings": warnings,
+                "trusted": bool(rows) and all(bool(item["trusted"]) for item in rows),
+                "trust_note": (
+                    "来源观测已物化；只有来源身份已绑定且字段映射已批准时才标记为可核验，"
+                    "仍不等同于自动修改后的正式企业模型。"
+                ),
+            }
+        )
+
     def _preflight(
         self, row: ActionInvocationRow, definition: ActionDefinitionRow
     ) -> dict[str, Any]:
@@ -1147,6 +2163,33 @@ class ActionService:
         # report false cross-branch assignments.
         payload: Any
         service: Any
+        if definition.execution_mode == ActionExecutionMode.CONNECTOR.value:
+            source_id, operation = self._build_erpnext_task_operation(
+                definition,
+                row.input,
+                operation_id=UUID(row.id),
+                target_entity_ids=[UUID(item) for item in row.target_entity_ids],
+            )
+            profile = IntegrationService(self.session, self.settings).connector_profile(
+                UUID(row.project_id), source_id
+            )
+            # Constructor validation is local only; no network/dry-run request is made.
+            ERPNextTaskBridgeClient(cast(dict[str, Any], profile))
+            return {
+                "valid": True,
+                "server_side_preview_ran": False,
+                "warnings": [
+                    "未向 ERPNext 发起远端预演；审批后仅提交一次，结果不确定时必须先回查。"
+                ],
+                "would_change": {
+                    "action": operation.action,
+                    "source_system_id": str(source_id),
+                    "operation_id": str(operation.operation_id),
+                    "payload": operation.payload,
+                    "expected_modified": operation.expected_modified,
+                    "payload_sha256": operation.payload_sha256,
+                },
+            }
         target_ids = [UUID(item) for item in row.target_entity_ids]
         for entity_id in target_ids:
             entity = self.projection.require_entity(row.project_id, entity_id)
@@ -1171,6 +2214,12 @@ class ActionService:
             HypothesisCreate.model_validate(row.input)
         elif key == "create_scenario":
             ScenarioCreate.model_validate(row.input)
+        elif key == "run_scenario_simulation":
+            payload = ScenarioSimulationAction.model_validate(row.input)
+            self.portfolio.require_project(UUID(row.project_id))
+            scenario = self.session.get(ScenarioRow, str(payload.scenario_id))
+            if scenario is None or scenario.project_id != row.project_id:
+                raise DomainError("SCENARIO_NOT_FOUND", "情景不存在。", status_code=404)
         elif key == "save_causal_hypothesis":
             payload = CausalHypothesisCreate.model_validate(row.input)
             ExplorationService(self.session).validate_causal_hypothesis(row.project_id, payload)
@@ -1266,6 +2315,62 @@ class ActionService:
                 "offset": payload.offset,
                 "limit": payload.limit,
             }
+        elif key == "read_source_observations":
+            payload = SourceObservationsReadAction.model_validate(row.input)
+            self.portfolio.require_project(UUID(row.project_id))
+            return {
+                "valid": True,
+                "warnings": [],
+                "would_change": [],
+                "source_record_keys": payload.source_record_keys,
+                "field_keys": payload.field_keys,
+                "source_assets": payload.source_assets,
+                "limit": payload.limit,
+            }
+        elif key == "search_management_observations":
+            ManagementObservationSearchAction.model_validate(row.input)
+            if self.observation_database is None:
+                raise DomainError(
+                    "OBSERVATION_STORE_UNAVAILABLE",
+                    "管理观察库当前不可用，检索未执行。",
+                    status_code=503,
+                )
+        elif key == "search_potential_records":
+            PotentialRecordsSearchAction.model_validate(row.input)
+            if self.potential_database is None:
+                raise DomainError(
+                    "POTENTIAL_STORE_UNAVAILABLE",
+                    "潜在库当前不可用，检索未执行。",
+                    status_code=503,
+                )
+        elif key == "work_observation.read":
+            payload = WorkObservationReadAction.model_validate(row.input)
+            if self.observation_database is None:
+                raise DomainError(
+                    "OBSERVATION_STORE_UNAVAILABLE",
+                    "工作观察库当前不可用，读取未执行。",
+                    status_code=503,
+                )
+            if payload.analysis_id is not None:
+                with self.observation_database.session_factory() as observation_session:
+                    WorkObservationService(observation_session).get_analysis(
+                        UUID(row.project_id), payload.analysis_id
+                    )
+        elif key == "work_observation.compare":
+            payload = WorkObservationCompareAction.model_validate(row.input)
+            if self.observation_database is None:
+                raise DomainError(
+                    "OBSERVATION_STORE_UNAVAILABLE",
+                    "工作观察库当前不可用，比较未执行。",
+                    status_code=503,
+                )
+            with self.observation_database.session_factory() as observation_session:
+                    WorkObservationService(observation_session).get_analysis(
+                        UUID(row.project_id), payload.analysis_id
+                    )
+        elif key == "read_enterprise_summary":
+            payload = EnterpriseSummaryReadAction.model_validate(row.input)
+            self.portfolio.require_project(UUID(row.project_id))
         elif key == "read_graph_neighborhood":
             payload = GraphNeighborhoodReadAction.model_validate(row.input)
             graph = self._read_graph_neighborhood(row, payload)
@@ -1330,11 +2435,38 @@ class ActionService:
         service: Any
         view: Any
         if definition.execution_mode == ActionExecutionMode.CONNECTOR.value:
-            raise DomainError(
-                "ACTION_CONNECTOR_UNAVAILABLE",
-                "当前版本没有可执行的外部系统连接器。",
-                status_code=409,
+            source_id, operation = self._build_erpnext_task_operation(
+                definition,
+                row.input,
+                operation_id=UUID(row.id),
+                target_entity_ids=[UUID(item) for item in row.target_entity_ids],
             )
+            profile = IntegrationService(self.session, self.settings).connector_profile(
+                project_id, source_id
+            )
+            receipt = ERPNextTaskBridgeClient(cast(dict[str, Any], profile)).execute(operation)
+            if receipt.operation_id != operation.operation_id:
+                raise DomainError(
+                    "ERPNEXT_TASK_RECEIPT_ID_MISMATCH",
+                    "ERPNext 回执的 operation_id 与原始动作不一致。",
+                    status_code=409,
+                )
+            if receipt.payload_sha256 != operation.payload_sha256:
+                raise DomainError(
+                    "ERPNEXT_TASK_RECEIPT_HASH_MISMATCH",
+                    "ERPNext 回执内容哈希与原始请求不一致。",
+                    status_code=409,
+                )
+            if receipt.status == ERPNextTaskOperationStatus.UNKNOWN:
+                raise ERPNextTaskOutcomeUnknown(operation.operation_id, "REMOTE_STATUS_UNKNOWN")
+            if receipt.status != ERPNextTaskOperationStatus.COMMITTED:
+                raise DomainError(
+                    f"ERPNEXT_TASK_{receipt.status.value}",
+                    receipt.message or "ERPNext 未确认 Task 动作已提交。",
+                    status_code=409,
+                    details=[{"operation_id": str(operation.operation_id)}],
+                )
+            return self._erpnext_task_result(operation, receipt)
         key = definition.key
         if key == "save_hypothesis":
             view = ExplorationService(self.session).create_hypothesis(
@@ -1346,6 +2478,22 @@ class ActionService:
                 project_id, ScenarioCreate.model_validate(row.input)
             )
             return {"resource": "SCENARIO", "id": str(view.id), "trusted": False}
+        if key == "run_scenario_simulation":
+            payload = ScenarioSimulationAction.model_validate(row.input)
+            view = ScenarioRunService(self.session).run(
+                project_id,
+                payload.scenario_id,
+                ScenarioSimulationRequest(cases=payload.cases, created_by=payload.created_by),
+            )
+            return {
+                "resource": "SCENARIO_RUN",
+                "id": str(view.id),
+                "status": view.status,
+                "scenario_id": str(view.scenario_id),
+                "result": view.result,
+                "rule_snapshot": view.rule_snapshot,
+                "trusted": False,
+            }
         if key == "save_causal_hypothesis":
             view = ExplorationService(self.session).create_causal_hypothesis(
                 project_id,
@@ -1472,6 +2620,12 @@ class ActionService:
                 "query_snapshot_id": str(view.query_snapshot_id),
                 "row_count": len(view.rows),
                 "rows": view.rows[:50],
+                "total_rows": view.total_rows,
+                "offset": view.offset,
+                "limit": view.limit,
+                "returned": len(view.rows),
+                "next_offset": view.next_offset,
+                "truncated": view.truncated,
                 "warnings": view.warnings,
                 "trusted": True,
             }
@@ -1509,6 +2663,83 @@ class ActionService:
                 "items": [item.model_dump(mode="json") for item in fragments],
                 "trusted": True,
             }
+        if key == "read_source_observations":
+            return self._read_source_observations(
+                row, SourceObservationsReadAction.model_validate(row.input)
+            )
+        if key == "search_management_observations":
+            payload = ManagementObservationSearchAction.model_validate(row.input)
+            return self._search_management_observations(project_id, payload)
+        if key == "search_potential_records":
+            payload = PotentialRecordsSearchAction.model_validate(row.input)
+            return self._search_potential_records(project_id, payload)
+        if key == "work_observation.read":
+            payload = WorkObservationReadAction.model_validate(row.input)
+            if self.observation_database is None:
+                raise DomainError(
+                    "OBSERVATION_STORE_UNAVAILABLE",
+                    "工作观察库当前不可用，读取未执行。",
+                    status_code=503,
+                )
+            with self.observation_database.session_factory() as observation_session:
+                service = WorkObservationService(observation_session)
+                analysis = (
+                    service.get_analysis(project_id, payload.analysis_id)
+                    if payload.analysis_id is not None
+                    else service.latest_analysis(project_id)
+                )
+            if analysis is None:
+                return {
+                    "resource": "WORK_OBSERVATION",
+                    "analysis_id": None,
+                    "event_count": 0,
+                    "employee_count": 0,
+                    "employee_paths": {},
+                    "segments": [],
+                    "trusted": False,
+                    "trust_note": "当前项目还没有已完成的工作观察分析。",
+                }
+            employee_paths = analysis.result.get("employee_paths", {})
+            if payload.employee_keys:
+                employee_paths = {
+                    key: value
+                    for key, value in employee_paths.items()
+                    if key in payload.employee_keys
+                }
+            segments = analysis.result.get("segments", []) if payload.include_segments else []
+            return {
+                "resource": "WORK_OBSERVATION",
+                "analysis_id": str(analysis.id),
+                "event_count": analysis.event_count,
+                "segment_count": analysis.segment_count,
+                "employee_count": analysis.employee_count,
+                "employee_paths": dict(list(employee_paths.items())[: payload.limit]),
+                "segments": segments[: payload.limit],
+                "limitations": analysis.result.get("limitations", []),
+                "trusted": False,
+                "trust_note": "工作观察是独立采集得到的描述性证据，不代表绩效或因果。",
+            }
+        if key == "work_observation.compare":
+            payload = WorkObservationCompareAction.model_validate(row.input)
+            if self.observation_database is None:
+                raise DomainError(
+                    "OBSERVATION_STORE_UNAVAILABLE",
+                    "工作观察库当前不可用，比较未执行。",
+                    status_code=503,
+                )
+            project = self.portfolio.require_project(project_id)
+            with self.observation_database.session_factory() as observation_session:
+                comparison = WorkObservationService(observation_session).compare(project, payload)
+            return {
+                "resource": "WORK_OBSERVATION_COMPARISON",
+                **comparison.model_dump(mode="json"),
+                "trusted": False,
+                "trust_note": "比较结果只表示已观察路径差异，不表示绩效或因果。",
+            }
+        if key == "read_enterprise_summary":
+            return self._read_enterprise_summary(
+                row, EnterpriseSummaryReadAction.model_validate(row.input)
+            )
         if key == "read_graph_neighborhood":
             payload = GraphNeighborhoodReadAction.model_validate(row.input)
             graph = self._read_graph_neighborhood(row, payload)

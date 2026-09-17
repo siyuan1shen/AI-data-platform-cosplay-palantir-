@@ -215,7 +215,7 @@ export function SourceDataPanel({ projectId }: { projectId: string }) {
     onError: (value) => setError(value),
   });
   const datasetQueryMutation = useMutation({
-    mutationFn: (dataset: SemanticDataset) => api.querySemanticDataset(projectId, dataset.id, { query_snapshot_id: null, limit: 200, include_lineage: true }),
+    mutationFn: (dataset: SemanticDataset) => api.querySemanticDataset(projectId, dataset.id, { query_snapshot_id: null, limit: 200, offset: 0, include_lineage: true }),
     onSuccess: (value) => { setDatasetResult(value); setNotice(`查询完成：返回 ${value.rows.length} 行。`); },
     onError: (value) => setError(value),
   });

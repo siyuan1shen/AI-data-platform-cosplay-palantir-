@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from datetime import timedelta
 from threading import Event
@@ -11,8 +12,11 @@ from sqlalchemy.orm import Session
 
 from enterprise_insight_backend.agent_runtime import AgentRuntimeService
 from enterprise_insight_backend.config import Settings
+from enterprise_insight_backend.control import ControlDatabase, ControlIndexService
 from enterprise_insight_backend.database import Database
 from enterprise_insight_backend.models import AgentRunRow
+from enterprise_insight_backend.observations import ObservationDatabase
+from enterprise_insight_backend.potential import PotentialDatabase
 from enterprise_insight_backend.schemas import AgentRunStatus
 from enterprise_insight_backend.service_utils import now_utc
 
@@ -23,6 +27,7 @@ ACTIVE_STATUSES = (
     AgentRunStatus.PRODUCING_PROPOSAL.value,
     AgentRunStatus.VALIDATING.value,
 )
+logger = logging.getLogger(__name__)
 
 
 class _LeaseLost(RuntimeError):
@@ -30,9 +35,19 @@ class _LeaseLost(RuntimeError):
 
 
 class AgentWorker:
-    def __init__(self, database: Database, settings: Settings) -> None:
+    def __init__(
+        self,
+        database: Database,
+        settings: Settings,
+        observation_database: ObservationDatabase | None = None,
+        potential_database: PotentialDatabase | None = None,
+        control_database: ControlDatabase | None = None,
+    ) -> None:
         self.database = database
         self.settings = settings
+        self.observation_database = observation_database
+        self.potential_database = potential_database
+        self.control_database = control_database
         self.stop_event = asyncio.Event()
         self.task: asyncio.Task[None] | None = None
         self.worker_id = str(uuid4())
@@ -156,12 +171,27 @@ class AgentWorker:
                     return
                 self._assert_lease(run_id, lease_token, lease_lost)
                 self._install_lease_guards(session, run_id, lease_token, lease_lost)
-                AgentRuntimeService(session, self.settings).process_run(project_id, run_id)
+                AgentRuntimeService(
+                    session,
+                    self.settings,
+                    self.observation_database,
+                    self.potential_database,
+                ).process_run(project_id, run_id)
                 session.refresh(run)
                 if run.worker_id != lease_token:
                     session.rollback()
                     return
                 session.commit()
+                if self.control_database is not None:
+                    with self.control_database.session_factory() as control_session:
+                        try:
+                            ControlIndexService(control_session).synchronize_routes(session)
+                            control_session.commit()
+                        except Exception:
+                            control_session.rollback()
+                            # The formal route record has already committed. Keep
+                            # the task result and let the reconciliation worker retry.
+                            logger.exception("Control index immediate sync failed")
                 self._release_lease(run_id, lease_token)
         except _LeaseLost:
             # A stale attempt must never turn its in-memory result into a durable

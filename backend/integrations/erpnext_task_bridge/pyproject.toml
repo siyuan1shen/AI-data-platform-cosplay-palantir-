@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "enterprise-insight-task-bridge"
+version = "0.1.0"
+description = "A narrow, idempotent Frappe v16 Task operation bridge for Enterprise Insight."
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["enterprise_insight_task_bridge*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+enterprise_insight_task_bridge = ["**/*.json", "modules.txt", "patches.txt"]

@@ -10,6 +10,7 @@ from enterprise_insight_backend.schemas import (
     CausalHypothesisCreate,
     ChangeSetCreate,
     DesignTradeoffCreate,
+    EnterpriseSummaryReadAction,
     EntityCreate,
     GraphNeighborhoodReadAction,
     HypothesisCreate,
@@ -17,18 +18,24 @@ from enterprise_insight_backend.schemas import (
     LearningCaseDraftFromActionCreate,
     LearningCaseDraftFromScenarioCreate,
     ManagementAnalysisRequest,
+    ManagementObservationSearchAction,
     MaterialFragmentsReadAction,
     MeetingRecordCreate,
     ObservationConflictResolveAction,
+    PotentialRecordsSearchAction,
     RawBatchMaterializeAction,
     RelationCreate,
     ScenarioCreate,
+    ScenarioSimulationAction,
     SemanticDatasetCreate,
     SemanticDatasetQueryAction,
     SemanticMappingAdvanceAction,
     SemanticMappingCreate,
     SemanticMappingSuggestionsReadAction,
     SourceIdentityBindAction,
+    SourceObservationsReadAction,
+    WorkObservationCompareAction,
+    WorkObservationReadAction,
 )
 
 
@@ -90,6 +97,12 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         ),
         ToolSpec("save_hypothesis", MANAGEMENT, HypothesisCreate, handler_name="save_hypothesis"),
         ToolSpec("create_scenario", MANAGEMENT, ScenarioCreate, handler_name="create_scenario"),
+        ToolSpec(
+            "run_scenario_simulation",
+            MANAGEMENT,
+            ScenarioSimulationAction,
+            handler_name="run_scenario_simulation",
+        ),
         ToolSpec(
             "save_causal_hypothesis",
             MANAGEMENT,
@@ -187,10 +200,46 @@ TOOL_SPECS: dict[str, ToolSpec] = {
             handler_name="read_material_fragments",
         ),
         ToolSpec(
+            "read_source_observations",
+            CONTEXT_READERS,
+            SourceObservationsReadAction,
+            handler_name="read_source_observations",
+        ),
+        ToolSpec(
+            "read_enterprise_summary",
+            CONTEXT_READERS,
+            EnterpriseSummaryReadAction,
+            handler_name="read_enterprise_summary",
+        ),
+        ToolSpec(
             "read_graph_neighborhood",
             CONTEXT_READERS,
             GraphNeighborhoodReadAction,
             handler_name="read_graph_neighborhood",
+        ),
+        ToolSpec(
+            "search_management_observations",
+            CONTEXT_READERS,
+            ManagementObservationSearchAction,
+            handler_name="search_management_observations",
+        ),
+        ToolSpec(
+            "search_potential_records",
+            CONTEXT_READERS,
+            PotentialRecordsSearchAction,
+            handler_name="search_potential_records",
+        ),
+        ToolSpec(
+            "work_observation.read",
+            CONTEXT_READERS,
+            WorkObservationReadAction,
+            handler_name="work_observation_read",
+        ),
+        ToolSpec(
+            "work_observation.compare",
+            CONTEXT_READERS,
+            WorkObservationCompareAction,
+            handler_name="work_observation_compare",
         ),
     )
 }

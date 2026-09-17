@@ -14,7 +14,7 @@ from sqlalchemy.engine.reflection import Inspector
 
 from enterprise_insight_backend.models import Base
 
-DATABASE_SCHEMA_REVISION = "c38d9e1a2b74"
+DATABASE_SCHEMA_REVISION = "c3d4e5f6a7b8"
 
 
 def upgrade_database(engine: Engine, database_url: str) -> None:

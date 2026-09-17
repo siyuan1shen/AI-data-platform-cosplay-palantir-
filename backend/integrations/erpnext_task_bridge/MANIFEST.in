@@ -1,0 +1,2 @@
+recursive-include enterprise_insight_task_bridge *.json *.txt
+include README.md

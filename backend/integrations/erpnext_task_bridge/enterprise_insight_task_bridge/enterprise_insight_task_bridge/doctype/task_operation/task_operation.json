@@ -1,0 +1,39 @@
+{
+  "doctype": "DocType",
+  "name": "Task Operation",
+  "module": "Enterprise Insight Task Bridge",
+  "autoname": "field:operation_id",
+  "naming_rule": "By fieldname",
+  "engine": "InnoDB",
+  "editable_grid": 0,
+  "track_changes": 0,
+  "field_order": [
+    "operation_id",
+    "action",
+    "payload_sha256",
+    "expected_modified",
+    "requested_by",
+    "requested_on",
+    "status",
+    "task_name",
+    "response_json"
+  ],
+  "fields": [
+    {"fieldname": "operation_id", "fieldtype": "Data", "label": "Operation ID", "reqd": 1, "in_list_view": 1, "search_index": 1},
+    {"fieldname": "action", "fieldtype": "Select", "label": "Action", "options": "CREATE\nUPDATE\nREAD\nCANCEL", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "payload_sha256", "fieldtype": "Data", "label": "Payload SHA-256", "reqd": 1},
+    {"fieldname": "expected_modified", "fieldtype": "Data", "label": "Expected Modified"},
+    {"fieldname": "requested_by", "fieldtype": "Link", "label": "Requested By", "options": "User", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "requested_on", "fieldtype": "Datetime", "label": "Requested On", "reqd": 1, "in_list_view": 1},
+    {"fieldname": "status", "fieldtype": "Select", "label": "Status", "options": "PROCESSING\nCOMMITTED\nNOT_FOUND\nCONFLICT\nREJECTED\nFAILED", "reqd": 1, "default": "PROCESSING", "in_list_view": 1},
+    {"fieldname": "task_name", "fieldtype": "Data", "label": "Task Name", "in_list_view": 1, "search_index": 1},
+    {"fieldname": "response_json", "fieldtype": "Long Text", "label": "Result JSON", "reqd": 1}
+  ],
+  "permissions": [
+    {"role": "System Manager", "read": 1, "report": 1, "export": 0, "write": 0, "create": 0, "delete": 0, "share": 0, "print": 0, "email": 0}
+  ],
+  "sort_field": "requested_on",
+  "sort_order": "DESC",
+  "title_field": "operation_id",
+  "search_fields": "operation_id,task_name,requested_by"
+}

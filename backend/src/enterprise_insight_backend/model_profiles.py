@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from time import perf_counter
 from uuid import UUID
 
@@ -160,7 +161,11 @@ class ModelProfileService:
                     "model": row.model,
                     "messages": [{"role": "user", "content": "仅回复 OK"}],
                     "temperature": 0,
-                    "max_tokens": 8,
+                    # Reasoning-capable models may consume a few tokens before
+                    # producing the final content.  Eight tokens can therefore
+                    # return HTTP 200 with an empty answer and falsely report
+                    # an incompatible response format.
+                    "max_tokens": 256,
                 },
                 timeout=min(row.timeout_seconds, 30),
             )
@@ -169,6 +174,30 @@ class ModelProfileService:
             content = body["choices"][0]["message"]["content"]
             if not isinstance(content, str) or not content.strip():
                 raise ValueError("empty model response")
+        except httpx.HTTPStatusError as exc:
+            latency = int((perf_counter() - started) * 1000)
+            detail = ""
+            try:
+                body = exc.response.json()
+                error = body.get("error") if isinstance(body, dict) else None
+                if isinstance(error, dict):
+                    detail = str(error.get("message") or error.get("type") or "")
+                elif isinstance(error, str):
+                    detail = error
+                detail = re.sub(r"sk-[A-Za-z0-9_-]+", "[REDACTED]", detail).strip()
+            except (TypeError, ValueError):
+                detail = ""
+            message = f"连接失败：HTTP {exc.response.status_code}"
+            if detail:
+                message = f"{message}（{detail[:160]}）"
+            return ModelProfileTestView(
+                profile_id=UUID(row.id),
+                ok=False,
+                message=message,
+                model=row.model,
+                latency_ms=latency,
+                checked_at=now_utc(),
+            )
         except httpx.HTTPError as exc:
             latency = int((perf_counter() - started) * 1000)
             return ModelProfileTestView(

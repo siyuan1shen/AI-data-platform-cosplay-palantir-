@@ -31,4 +31,16 @@ instances/
 *.tar
 *.tar.gz
 .enterprise-insight-benchmark-*/
+test-temp-*/
+.tmp-test-*/
 backend/.test-*/
+
+# Optional Understand-Anything developer viewer (third-party checkout is local only).
+.tools/
+.ua/intermediate/
+.ua/tmp/
+.ua/.understandignore
+.ua/config.json
+.ua/diff-overlay.json
+# Local Understand-Anything indexes and generated graph artifacts.
+.ua/

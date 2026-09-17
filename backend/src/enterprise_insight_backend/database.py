@@ -12,7 +12,7 @@ from enterprise_insight_backend.migration import upgrade_database
 class Database:
     def __init__(self, settings: Settings) -> None:
         connect_args = (
-            {"check_same_thread": False}
+            {"check_same_thread": False, "timeout": 30}
             if settings.resolved_database_url.startswith("sqlite")
             else {}
         )

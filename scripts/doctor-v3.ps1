@@ -8,11 +8,22 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
-$python = Get-Command "python.exe" -ErrorAction SilentlyContinue
 $pythonOk = $false
-if ($null -ne $python) {
-    $pythonVersion = (& $python.Source -c 'import sys; print(sys.version_info.major, sys.version_info.minor, sep=chr(46))').Trim()
-    $pythonOk = $pythonVersion -eq "3.12"
+$pythonLauncher = Get-Command "py.exe" -ErrorAction SilentlyContinue
+if ($null -ne $pythonLauncher) {
+    try {
+        $pythonVersion = (& $pythonLauncher.Source -3.12 -c 'import sys; print(sys.version_info.major, sys.version_info.minor, sep=chr(46))').Trim()
+        $pythonOk = $LASTEXITCODE -eq 0 -and $pythonVersion -eq "3.12"
+    } catch {
+        $pythonOk = $false
+    }
+}
+if (-not $pythonOk) {
+    $python = Get-Command "python.exe" -ErrorAction SilentlyContinue
+    if ($null -ne $python) {
+        $pythonVersion = (& $python.Source -c 'import sys; print(sys.version_info.major, sys.version_info.minor, sep=chr(46))').Trim()
+        $pythonOk = $pythonVersion -eq "3.12"
+    }
 }
 $node = Get-Command "node.exe" -ErrorAction SilentlyContinue
 $nodeOk = $false

@@ -98,6 +98,41 @@ export type ScenarioRevisionRequest = ApiSchemas["ScenarioRevisionRequest"];
 export type ScenarioDiff = ApiSchemas["ScenarioDiffView"];
 export type ScenarioCompareRequest = ApiSchemas["ScenarioCompareRequest"];
 export type ScenarioComparison = ApiSchemas["ScenarioComparisonView"];
+export interface ScenarioCaseInput {
+  key: string;
+  label: string;
+  periods: string[];
+  demand: number[];
+  capacity: number[];
+  initial_inventory: number;
+  initial_backlog: number;
+  unit: string;
+  flow_mode: "STORABLE_GOODS" | "NON_STORABLE_SERVICE";
+}
+export interface ScenarioSimulationRequest {
+  cases: ScenarioCaseInput[];
+  created_by?: string;
+}
+export interface ScenarioRun {
+  id: string;
+  project_id: string;
+  scenario_id: string;
+  scenario_revision: number;
+  baseline_revision: number;
+  status: string;
+  input_snapshot: Record<string, unknown>;
+  rule_snapshot: Record<string, unknown>;
+  result: { cases?: Array<Record<string, any>>; limitations?: string[] };
+  errors: Array<Record<string, any>>;
+  created_by: string;
+  created_at: string;
+}
+export interface ScenarioRunComparison {
+  left_run_id: string;
+  right_run_id: string;
+  cases: Array<Record<string, any>>;
+  limitations: string[];
+}
 export type GraphQuery = ApiSchemas["GraphQuery"];
 export type ExportRequest = ApiSchemas["ExportRequest"];
 export type ExportJob = ApiSchemas["ExportJobView"];
@@ -132,6 +167,31 @@ export type ManagementIssue = ApiSchemas["ManagementIssueView"];
 export type ManagementIssueFeedback = ApiSchemas["ManagementIssueFeedbackView"];
 export type ManagementIssueReopen = ApiSchemas["ManagementIssueReopen"];
 export type ManagementSignal = ApiSchemas["ManagementSignalView"];
+export type ManagementAction = ApiSchemas["ManagementActionView"];
+export type ManagementActionCreate = ApiSchemas["ManagementActionCreate"];
+export type ManagementActionUpdate = ApiSchemas["ManagementActionUpdate"];
+export type ManagementActionRevisionRequest = ApiSchemas["ManagementActionRevisionRequest"];
+export type ManagementActionEventCreate = ApiSchemas["ManagementActionEventCreate"];
+export type ManagementActionVerifyDone = ApiSchemas["ManagementActionVerifyDone"];
+export type ManagementActionEvent = ApiSchemas["ManagementActionEventView"];
+export type ManagementActionStatus = ApiSchemas["ManagementActionStatus"];
+export type ManagementActionActiveStatus = ApiSchemas["ManagementActionActiveStatus"];
+export type ManagementActionPriority = ApiSchemas["ManagementActionPriority"];
+export type ManagementActionEventType = ApiSchemas["ManagementActionEventType"];
+export type ManagementObservationKind = ApiSchemas["ManagementObservationKind"];
+export type ObservationCreate = ApiSchemas["ObservationCreate"];
+export type ObservationUpdate = ApiSchemas["ObservationUpdate"];
+export type ObservationView = ApiSchemas["ObservationView"];
+export type ObservationHistoryView = ApiSchemas["ObservationHistoryView"];
+export type ObservationExtractRequest = ApiSchemas["ObservationExtractRequest"];
+export type ObservationExtractionView = ApiSchemas["ObservationExtractionView"];
+export type ObservationExtractionHistoryView = ApiSchemas["ObservationExtractionHistoryView"];
+export type ObservationAttachment = ApiSchemas["ObservationAttachmentView"];
+export type ObservationIngestion = ApiSchemas["ObservationIngestionView"];
+export type ObservationIngestionRequest = Omit<ApiSchemas["Body_ingest_management_observation_api_v3_projects__project_id__observation_ingestions_post"], "file" | "observation_kind"> & {
+  file: File;
+  observation_kind: ManagementObservationKind;
+};
 export type MetricDefinition = ApiSchemas["MetricDefinitionView"];
 export type MetricDefinitionCreate = ApiSchemas["MetricDefinitionCreate"];
 export type MetricDefinitionUpdate = ApiSchemas["MetricDefinitionUpdate"];
@@ -144,6 +204,76 @@ export type DesignTradeoff = ApiSchemas["DesignTradeoffView"];
 export type InformationRequest = ApiSchemas["InformationRequestView"];
 export type InformationRequestUpdate = ApiSchemas["InformationRequestUpdate"];
 export type CausalHypothesis = ApiSchemas["CausalHypothesisView"];
+export type PotentialType = "RELATION_HYPOTHESIS" | "PROBLEM_HYPOTHESIS" | "DESIGN_TRADEOFF" | "CAUSAL_HYPOTHESIS" | "MANAGEMENT_LEARNING";
+export type PotentialHumanStatus = "ACCEPTED" | "REJECTED" | "WITHDRAWN";
+export type PotentialEvidenceStatus = "UNTESTED" | "SUPPORTED" | "CONTESTED" | "REFUTED" | "STALE";
+export type PotentialOperation = "CREATED" | "ACCEPTED" | "EDITED" | "REJECTED" | "WITHDRAWN";
+export interface PotentialEvidence { source_ref: string; excerpt: string; observed_at?: string | null; note?: string | null; }
+export interface PotentialFields {
+  company_id: string;
+  project_id: string;
+  potential_type: PotentialType;
+  claim: string;
+  applicability_scope: string;
+  valid_from: string | null;
+  valid_until: string | null;
+  task_source: string;
+  supporting_evidence: PotentialEvidence[];
+  counterevidence: PotentialEvidence[];
+  verification_method: string;
+  evidence_status: PotentialEvidenceStatus;
+}
+export interface PotentialRecordCreate extends PotentialFields { idempotency_key?: string; }
+export interface PotentialRecordUpdate {
+  expected_version: number;
+  reason: string;
+  potential_type?: PotentialType;
+  claim?: string;
+  applicability_scope?: string;
+  valid_from?: string | null;
+  valid_until?: string | null;
+  task_source?: string;
+  supporting_evidence?: PotentialEvidence[];
+  counterevidence?: PotentialEvidence[];
+  verification_method?: string;
+  evidence_status?: PotentialEvidenceStatus;
+}
+export interface PotentialRecordStatusRequest { expected_version: number; reason: string; }
+export interface PotentialRecord extends PotentialFields {
+  id: string;
+  human_status: PotentialHumanStatus;
+  version: number;
+  payload_hash: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface PotentialVersion {
+  id: string;
+  record_id: string;
+  version: number;
+  payload_hash: string;
+  snapshot: Record<string, unknown>;
+  operation: PotentialOperation;
+  actor_id: string;
+  reason: string | null;
+  created_at: string;
+}
+export interface PotentialAudit {
+  id: string;
+  record_id: string;
+  company_id: string;
+  project_id: string;
+  version: number;
+  operation: PotentialOperation;
+  actor_id: string;
+  before_hash: string | null;
+  after_hash: string;
+  reason: string | null;
+  created_at: string;
+}
+export interface PotentialHistory { versions: PotentialVersion[]; audit: PotentialAudit[]; }
+export interface PotentialPage { items: PotentialRecord[]; total: number; }
 export type RestorePreview = ApiSchemas["RestorePreviewView"];
 export type RestoreConfirmRequest = ApiSchemas["RestoreConfirmRequest"];
 export type RestoreResult = ApiSchemas["RestoreResultView"];
@@ -151,4 +281,169 @@ export type RestoreResult = ApiSchemas["RestoreResultView"];
 export interface Page<T> {
   items: T[];
   total: number;
+}
+
+export interface WorkObservationActivity {
+  app: string;
+  domain?: string | null;
+  category?: string | null;
+  context?: string | null;
+}
+
+export interface WorkObservationEvent {
+  event_id: string;
+  session_id: string;
+  sequence: number;
+  observed_at: string;
+  source_employee_key: string;
+  source_role_key?: string | null;
+  activity: WorkObservationActivity;
+  state?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WorkObservationPackage {
+  format_version: string;
+  batch_id: string;
+  source_id: string;
+  events: WorkObservationEvent[];
+}
+
+export interface WorkObservationBatch {
+  id: string;
+  project_id: string;
+  source_batch_id: string;
+  source_id: string;
+  format_version: string;
+  payload_hash: string;
+  event_count: number;
+  accepted_count: number;
+  duplicate_count: number;
+  status: string;
+  created_at: string;
+}
+
+export interface WorkObservationImportResult {
+  batch_id: string;
+  source_batch_id: string;
+  status: string;
+  accepted_count: number;
+  duplicate_count: number;
+  event_count: number;
+  duplicate: boolean;
+}
+
+export interface WorkObservationIdentityBinding {
+  id: string;
+  project_id: string;
+  source_id: string;
+  source_employee_key: string;
+  formal_entity_id: string;
+  formal_role_key?: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkObservationIdentityBindingHistory {
+  id: string;
+  project_id: string;
+  source_id: string;
+  source_employee_key: string;
+  formal_entity_id?: string | null;
+  formal_role_key?: string | null;
+  operation: string;
+  actor_id: string;
+  reason?: string | null;
+  created_at: string;
+}
+
+export interface WorkObservationVirtualCandidate {
+  id: string;
+  project_id: string;
+  analysis_id: string;
+  candidate_type: string;
+  label: string;
+  role_key?: string | null;
+  properties: Record<string, unknown>;
+  evidence_segment_ids: string[];
+  status: string;
+  virtual_work_model_id?: string | null;
+  virtual_node_id?: string | null;
+  virtual_edge_id?: string | null;
+  decision_reason?: string | null;
+  created_at: string;
+  decided_at?: string | null;
+}
+
+export interface WorkObservationPreview {
+  id: string;
+  project_id: string;
+  source_batch_id: string;
+  source_id: string;
+  format_version: string;
+  payload_hash: string;
+  event_count: number;
+  status: string;
+  created_at: string;
+  sample_events?: Array<Record<string, unknown>>;
+  employee_keys?: string[];
+  role_keys?: string[];
+  state_counts?: Record<string, number>;
+  first_observed_at?: string | null;
+  last_observed_at?: string | null;
+  duplicate_event_count?: number;
+  conflict_event_count?: number;
+  identity_status?: string;
+  warnings?: string[];
+}
+
+export interface WorkObservationCoverage {
+  project_id: string;
+  event_count: number;
+  foreground_event_count: number;
+  employee_count: number;
+  session_count: number;
+  source_count: number;
+  first_observed_at: string | null;
+  last_observed_at: string | null;
+  batch_count: number;
+}
+
+export interface WorkObservationAnalysis {
+  id: string;
+  project_id: string;
+  status: string;
+  filters: Record<string, unknown>;
+  event_count: number;
+  segment_count: number;
+  employee_count: number;
+  result: {
+    nodes?: Array<Record<string, unknown>>;
+    edges?: Array<Record<string, unknown>>;
+    patterns?: Array<Record<string, unknown>>;
+    employee_paths?: Record<string, Array<{ path: string[]; count: number }>>;
+    segments?: Array<Record<string, unknown>>;
+    limitations?: string[];
+    [key: string]: unknown;
+  };
+  created_at: string;
+}
+
+export interface WorkObservationComparison {
+  id: string;
+  project_id: string;
+  analysis_id: string;
+  left_employee_keys: string[];
+  right_employee_keys: string[];
+  result: {
+    left_paths?: Array<{ path: string[]; count: number }>;
+    right_paths?: Array<{ path: string[]; count: number }>;
+    only_left?: string[][];
+    only_right?: string[][];
+    shared?: string[][];
+    limitations?: string[];
+    [key: string]: unknown;
+  };
+  created_at: string;
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -43,6 +44,143 @@ def test_every_historical_revision_upgrades_and_preserves_company(
     for name, table in Base.metadata.tables.items():
         assert actual.has_table(name), (revision, name)
         assert set(table.columns.keys()) <= {column["name"] for column in actual.get_columns(name)}
+    database.engine.dispose()
+
+
+def test_management_action_upgrade_adds_idempotency_without_losing_history(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, "management-action-idempotency-upgrade.db")
+    config = _config(str(database.engine.url))
+    with database.engine.begin() as connection:
+        config.attributes["connection"] = connection
+        command.upgrade(config, "f6a8c2d4019b")
+    with database.session_factory.begin() as session:
+        company = CompanyRow(name="管理行动升级保留企业")
+        session.add(company)
+        session.flush()
+        project = ProjectRow(company_id=company.id, name="保留行动历史")
+        session.add(project)
+        session.flush()
+        company_id = company.id
+        project_id = project.id
+
+    timestamp = datetime.now(UTC).isoformat()
+    with database.engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO management_actions (
+                    id, company_id, project_id, title, description, owner,
+                    priority, status, due_at, reported_done_at, reported_done_by,
+                    verified_done_at, verified_done_by, revision, created_by,
+                    created_at, updated_at
+                ) VALUES (
+                    'action-before-upgrade', :company_id, :project_id,
+                    '升级前的现实行动', NULL, '负责人', 'HIGH', 'IN_PROGRESS',
+                    NULL, NULL, NULL, NULL, NULL, 2, 'local-owner', :timestamp, :timestamp
+                )
+                """
+            ),
+            {"company_id": company_id, "project_id": project_id, "timestamp": timestamp},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO management_action_events (
+                    id, company_id, project_id, action_id, revision, event_type,
+                    message, details, from_status, to_status, actor_id, reason, created_at
+                ) VALUES (
+                    'event-before-upgrade', :company_id, :project_id,
+                    'action-before-upgrade', 2, 'PROGRESS', '升级前进展', '{}',
+                    'OPEN', 'IN_PROGRESS', 'local-owner', '保留历史', :timestamp
+                )
+                """
+            ),
+            {"company_id": company_id, "project_id": project_id, "timestamp": timestamp},
+        )
+
+    database.create_schema()
+
+    with database.engine.connect() as connection:
+        action = connection.execute(
+            text(
+                "SELECT title, revision, idempotency_key, idempotency_hash "
+                "FROM management_actions WHERE id='action-before-upgrade'"
+            )
+        ).one()
+        event_count = connection.scalar(
+            text(
+                "SELECT COUNT(*) FROM management_action_events "
+                "WHERE action_id='action-before-upgrade'"
+            )
+        )
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+    assert tuple(action) == ("升级前的现实行动", 2, None, None)
+    assert event_count == 1
+    index_names = {
+        item["name"] for item in inspect(database.engine).get_indexes("management_actions")
+    }
+    assert "uq_management_action_project_idempotency" in index_names
+    database.engine.dispose()
+
+
+def test_source_secret_migration_adds_ciphertext_column_without_needing_a_key(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, "source-secret-upgrade.db")
+    config = _config(str(database.engine.url))
+    with database.engine.begin() as connection:
+        config.attributes["connection"] = connection
+        command.upgrade(config, "b7296f0c31ad")
+    with database.session_factory.begin() as session:
+        company = CompanyRow(name="数据源凭据迁移")
+        session.add(company)
+        session.flush()
+        project = ProjectRow(company_id=company.id, name="旧连接配置")
+        session.add(project)
+        session.flush()
+        project_id = project.id
+
+    legacy_profile = {
+        "base_url": "https://erp.invalid",
+        "api_key": "legacy-key-never-plaintext-after-first-use",
+        "nested": {"password": "legacy-password"},
+        "timeout": 20,
+    }
+    timestamp = datetime.now(UTC).isoformat()
+    with database.engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO source_systems ("
+                "id, project_id, name, kind, description, connection_profile, status, "
+                "last_tested_at, revision, created_at, updated_at"
+                ") VALUES ("
+                "'source-legacy', :project_id, '旧ERP', 'ERP', NULL, :profile, "
+                "'CONFIGURED', NULL, 1, :timestamp, :timestamp)"
+            ),
+            {
+                "project_id": project_id,
+                "profile": json.dumps(legacy_profile),
+                "timestamp": timestamp,
+            },
+        )
+
+    with database.engine.begin() as connection:
+        config.attributes["connection"] = connection
+        command.upgrade(config, "head")
+        stored_profile, encrypted = connection.execute(
+            text(
+                "SELECT connection_profile, encrypted_connection_secrets "
+                "FROM source_systems WHERE id='source-legacy'"
+            )
+        ).one()
+        revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+    assert revision == DATABASE_SCHEMA_REVISION
+    assert json.loads(stored_profile) == legacy_profile
+    assert encrypted is None
+    assert not (tmp_path / "model-profile.key").exists()
     database.engine.dispose()
 
 

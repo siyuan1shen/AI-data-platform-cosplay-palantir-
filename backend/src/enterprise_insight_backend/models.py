@@ -7,6 +7,7 @@ from uuid import uuid4
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -39,6 +40,10 @@ class CompanyRow(Base):
     name: Mapped[str] = mapped_column(String(200), index=True)
     industry: Mapped[str | None] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(Text)
+    # The first project is retained as the compatibility storage key for the
+    # company's single enterprise projection.  New UI flows resolve through
+    # this pointer and do not ask users to create a second model container.
+    canonical_project_id: Mapped[str | None] = mapped_column(String(36), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -56,6 +61,8 @@ class ProjectRow(Base):
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="ACTIVE", index=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    canonical_project_id: Mapped[str | None] = mapped_column(String(36), index=True)
     revision: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -276,6 +283,52 @@ class AgentRunRow(Base):
         return list((self.context_manifest or {}).get("action_invocation_ids", []))
 
 
+class AgentReadSetOutboxRow(Base):
+    """Transactional delivery record for immutable Agent context read sets."""
+
+    __tablename__ = "agent_readset_outbox"
+    __table_args__ = (
+        UniqueConstraint("run_id", "ordinal", name="uq_agent_readset_outbox_run_ordinal"),
+        Index("ix_agent_readset_outbox_pending", "delivered_at", "created_at"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    payload_sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error_code: Mapped[str | None] = mapped_column(String(80))
+
+
+class AgentStepOutboxRow(Base):
+    """Incremental control-index delivery for immutable Agent route/claim steps."""
+
+    __tablename__ = "agent_step_outbox"
+    __table_args__ = (
+        UniqueConstraint("step_id", name="uq_agent_step_outbox_step_id"),
+        Index("ix_agent_step_outbox_pending", "delivered_at", "created_at"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    step_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_steps.id", ondelete="CASCADE"), index=True
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))
+    payload_sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error_code: Mapped[str | None] = mapped_column(String(80))
+
+
 class AgentStepRow(Base):
     __tablename__ = "agent_steps"
     __table_args__ = (UniqueConstraint("run_id", "position", name="uq_agent_step_position"),)
@@ -359,6 +412,99 @@ class ActionInvocationRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class ManagementActionRow(Base):
+    """A human-owned management task, separate from executable action invocations."""
+
+    __tablename__ = "management_actions"
+    __table_args__ = (
+        Index(
+            "uq_management_action_project_idempotency",
+            "project_id",
+            "idempotency_key",
+            unique=True,
+        ),
+        Index("ix_management_action_project_status_due", "project_id", "status", "due_at"),
+        CheckConstraint(
+            "status IN ('OPEN', 'IN_PROGRESS', 'CANCELLED')",
+            name="ck_management_action_status",
+        ),
+        CheckConstraint(
+            "priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT')",
+            name="ck_management_action_priority",
+        ),
+        CheckConstraint(
+            "verified_done_at IS NULL OR reported_done_at IS NOT NULL",
+            name="ck_management_action_verified_requires_reported",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    company_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("companies.id", ondelete="RESTRICT"), index=True
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="RESTRICT"), index=True
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(String(200))
+    idempotency_hash: Mapped[str | None] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text)
+    owner: Mapped[str | None] = mapped_column(String(200))
+    priority: Mapped[str] = mapped_column(String(24), default="NORMAL", index=True)
+    status: Mapped[str] = mapped_column(String(24), default="OPEN", index=True)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reported_done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reported_done_by: Mapped[str | None] = mapped_column(String(128))
+    verified_done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_done_by: Mapped[str | None] = mapped_column(String(128))
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    __mapper_args__ = {"version_id_col": revision, "version_id_generator": False}
+
+    @property
+    def reported_done(self) -> bool:
+        return self.reported_done_at is not None
+
+    @property
+    def verified_done(self) -> bool:
+        return self.verified_done_at is not None
+
+
+class ManagementActionEventRow(Base):
+    """Append-only history for management-action changes and reported results."""
+
+    __tablename__ = "management_action_events"
+    __table_args__ = (
+        UniqueConstraint("action_id", "revision", name="uq_management_action_event_revision"),
+        Index("ix_management_action_event_project_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    company_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("companies.id", ondelete="RESTRICT"), index=True
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="RESTRICT"), index=True
+    )
+    action_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("management_actions.id", ondelete="RESTRICT"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    message: Mapped[str | None] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    from_status: Mapped[str | None] = mapped_column(String(24))
+    to_status: Mapped[str | None] = mapped_column(String(24))
+    actor_id: Mapped[str] = mapped_column(String(128))
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class ActionLogRow(Base):
@@ -472,6 +618,33 @@ class ScenarioRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class ScenarioRunRow(Base):
+    """Immutable result of a deterministic or explicitly exploratory run."""
+
+    __tablename__ = "scenario_runs"
+    __table_args__ = (
+        Index("ix_scenario_runs_project_created", "project_id", "created_at"),
+        Index("ix_scenario_runs_scenario_revision", "scenario_id", "scenario_revision"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    scenario_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("scenarios.id", ondelete="CASCADE"), index=True
+    )
+    scenario_revision: Mapped[int] = mapped_column(Integer)
+    baseline_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="SUCCEEDED", index=True)
+    input_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    rule_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    errors: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    created_by: Mapped[str] = mapped_column(String(128), default="management")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class LearningCaseRow(Base):
@@ -972,6 +1145,33 @@ class ImportPreviewRow(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class LifecycleDeletionAuditRow(Base):
+    """Immutable-by-convention record of temporary-data deletion.
+
+    This table deliberately lives beside the formal store, but it never stores
+    the deleted payload.  It records what was removed, why, and whether the
+    removal was automatic or explicitly requested by a human.
+    """
+
+    __tablename__ = "lifecycle_deletion_audit"
+    __table_args__ = (
+        Index("ix_lifecycle_deletion_audit_project_created", "project_id", "created_at"),
+        Index("ix_lifecycle_deletion_audit_resource", "resource_kind", "resource_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="SET NULL"), index=True
+    )
+    resource_kind: Mapped[str] = mapped_column(String(64), index=True)
+    resource_id: Mapped[str] = mapped_column(String(100), index=True)
+    deletion_mode: Mapped[str] = mapped_column(String(16), index=True)
+    actor_id: Mapped[str] = mapped_column(String(128))
+    reason: Mapped[str] = mapped_column(String(2_000))
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class SourceDocumentRow(Base):
     __tablename__ = "source_documents"
 
@@ -1031,6 +1231,7 @@ class SourceSystemRow(Base):
     kind: Mapped[str] = mapped_column(String(32))
     description: Mapped[str | None] = mapped_column(Text)
     connection_profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    encrypted_connection_secrets: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="CONFIGURED")
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revision: Mapped[int] = mapped_column(Integer, default=1)
@@ -1116,6 +1317,44 @@ class RawRecordRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class RawRecordValueRow(Base):
+    """Scalar lookup index for values inside immutable raw records.
+
+    Raw payloads remain the source of truth.  This narrow index exists so a
+    controlled cross-asset lookup (for example production.order_id -> order)
+    can use SQL predicates instead of loading every JSON payload into Python.
+    """
+
+    __tablename__ = "raw_record_values"
+    __table_args__ = (
+        UniqueConstraint(
+            "raw_record_id",
+            "field_path",
+            "value_text",
+            name="uq_raw_record_value_path_text",
+        ),
+        Index(
+            "ix_raw_record_value_project_text",
+            "project_id",
+            "value_text",
+            "raw_record_id",
+        ),
+        Index("ix_raw_record_value_record", "raw_record_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    raw_record_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("raw_records.id", ondelete="CASCADE"), index=True
+    )
+    field_path: Mapped[str] = mapped_column(String(500))
+    value_text: Mapped[str] = mapped_column(String(1000), index=True)
+    value_kind: Mapped[str] = mapped_column(String(32), default="SCALAR")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class MaterializationRunRow(Base):
     __tablename__ = "materialization_runs"
     __table_args__ = (
@@ -1162,6 +1401,14 @@ class SourceIdentityRow(Base):
             "target_type_key",
             name="uq_source_identity_record",
         ),
+        Index(
+            "ix_source_identity_lookup",
+            "project_id",
+            "source_system_id",
+            "source_asset",
+            "source_record_key",
+            "status",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -1194,6 +1441,35 @@ class ObservationAssertionRow(Base):
             "entity_id",
             "field_key",
             name="uq_observation_assertion_materialized_field",
+        ),
+        Index(
+            "ix_observation_assertion_source_lookup",
+            "project_id",
+            "status",
+            "source_asset",
+            "source_record_key",
+            "field_key",
+        ),
+        Index(
+            "ix_observation_assertion_source_key_lookup",
+            "project_id",
+            "status",
+            "source_record_key",
+        ),
+        Index(
+            "ix_observation_assertion_asset_field_lookup",
+            "project_id",
+            "status",
+            "source_asset",
+            "field_key",
+            "observed_at",
+        ),
+        Index(
+            "ix_observation_assertion_entity_time",
+            "project_id",
+            "entity_id",
+            "status",
+            "observed_at",
         ),
     )
 

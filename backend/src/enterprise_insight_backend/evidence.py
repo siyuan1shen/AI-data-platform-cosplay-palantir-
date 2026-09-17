@@ -21,6 +21,7 @@ from enterprise_insight_backend.models import (
     ObservationAssertionRow,
     RawBatchRow,
     RawRecordRow,
+    RawRecordValueRow,
     RelationParticipantRow,
     RelationRow,
     SemanticMappingRow,
@@ -53,6 +54,32 @@ from enterprise_insight_backend.schemas import (
 )
 from enterprise_insight_backend.service_utils import json_ready, now_utc
 from enterprise_insight_backend.transforms import apply_transform
+
+
+def _iter_scalar_value_index(value: Any, path: str = "$") -> list[tuple[str, str]]:
+    """Flatten raw JSON into bounded, case-folded lookup tokens.
+
+    The raw JSON remains authoritative.  This index is only for candidate
+    lookup and deliberately stores no replacement value or inferred relation.
+    """
+
+    if isinstance(value, dict):
+        result: list[tuple[str, str]] = []
+        for key, nested in value.items():
+            result.extend(_iter_scalar_value_index(nested, f"{path}.{key}"))
+        return result
+    if isinstance(value, list):
+        result = []
+        for ordinal, nested in enumerate(value):
+            result.extend(_iter_scalar_value_index(nested, f"{path}[{ordinal}]"))
+        return result
+    if value is None:
+        return []
+    text = str(value).strip().casefold()
+    if not text or len(text) > 1000:
+        return []
+    return [(path, text)]
+
 
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "company": (
@@ -1338,6 +1365,11 @@ class EvidenceService:
             materialization_run_id=run.id,
             raw_record_by_locator=raw_record_by_locator,
         )
+        self._ensure_raw_record_value_index(
+            project_id,
+            asset.asset_key,
+            raw_records,
+        )
         run.records_processed = len(rows)
         run.output_entity_ids = sorted(set(lineage["entity_ids"]))
         run.output_identity_ids = sorted(set(lineage["identity_ids"]))
@@ -1349,6 +1381,48 @@ class EvidenceService:
         batch.status = "MATERIALIZED" if (mappings or relation_mappings) else "NO_APPROVED_MAPPING"
         self.session.flush()
         return MaterializationRunView.model_validate(run), True
+
+    def _ensure_raw_record_value_index(
+        self,
+        project_id: UUID,
+        source_asset: str,
+        raw_records: list[RawRecordRow],
+    ) -> None:
+        """Add lookup tokens for a batch without duplicating immutable rows."""
+
+        if not raw_records:
+            return
+        raw_ids = [str(item.id) for item in raw_records]
+        indexed_ids = set(
+            self.session.scalars(
+                select(RawRecordValueRow.raw_record_id).where(
+                    RawRecordValueRow.project_id == str(project_id),
+                    RawRecordValueRow.raw_record_id.in_(raw_ids),
+                )
+            ).all()
+        )
+        for raw_record in raw_records:
+            if str(raw_record.id) in indexed_ids:
+                continue
+            values = _iter_scalar_value_index(raw_record.payload)
+            if raw_record.source_record_key:
+                values.append(
+                    ("$.__record_key__", str(raw_record.source_record_key).strip().casefold())
+                )
+            seen: set[tuple[str, str]] = set()
+            for field_path, value_text in values:
+                token = (field_path, value_text)
+                if token in seen:
+                    continue
+                seen.add(token)
+                self.session.add(
+                    RawRecordValueRow(
+                        project_id=str(project_id),
+                        raw_record_id=str(raw_record.id),
+                        field_path=field_path,
+                        value_text=value_text,
+                    )
+                )
 
     @staticmethod
     def _system_stable_key(

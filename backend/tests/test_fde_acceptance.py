@@ -206,10 +206,10 @@ def test_system_data_can_bind_to_design_and_be_exported_semantically(
     assert len(bundle.json()["observation_assertions"]) == 2
 
 
-def test_three_company_six_project_projection_portfolio_replay_is_isolated(
+def test_three_company_canonical_projection_portfolio_replay_is_isolated(
     client: TestClient,
 ) -> None:
-    """Replay the complete no-system path for a small multi-company portfolio."""
+    """Replay the no-system path with one canonical projection per company."""
     profile_id = _mock_profile(client)
     portfolio = {
         "华南智造样本公司": ("新品市场验证", "订单交付改善"),
@@ -228,19 +228,14 @@ def test_three_company_six_project_projection_portfolio_replay_is_isolated(
             f"/api/v3/projects?company_id={company_id}"
         )
         assert listed_company_projects.status_code == 200, listed_company_projects.text
-        assert listed_company_projects.json()["items"] == []
+        listed_items = listed_company_projects.json()["items"]
+        assert len(listed_items) == 1
+        assert listed_items[0]["canonical_project_id"] == listed_items[0]["id"]
+        created_projects.append(
+            (company_id, company_name, listed_items[0]["id"], project_names[0])
+        )
 
-        for project_name in project_names:
-            project_response = client.post(
-                f"/api/v3/companies/{company_id}/projects",
-                json={"name": project_name},
-            )
-            assert project_response.status_code == 201, project_response.text
-            created_projects.append(
-                (company_id, company_name, project_response.json()["id"], project_name)
-            )
-
-    assert len(created_projects) == 6
+    assert len(created_projects) == 3
 
     for company_id, company_name, project_id, project_name in created_projects:
         csv_text = (
@@ -316,7 +311,8 @@ def test_three_company_six_project_projection_portfolio_replay_is_isolated(
         assert executive.json()["company"]["id"] == company_id
         assert executive.json()["project"]["id"] == project_id
 
-    for company_id, _, _, _ in created_projects[::2]:
+    for company_id, _, project_id, _ in created_projects:
         projects = client.get(f"/api/v3/projects?company_id={company_id}")
         assert projects.status_code == 200, projects.text
-        assert len(projects.json()["items"]) == 2
+        assert len(projects.json()["items"]) == 1
+        assert projects.json()["items"][0]["id"] == project_id

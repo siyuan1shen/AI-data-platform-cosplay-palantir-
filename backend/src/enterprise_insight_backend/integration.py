@@ -3,15 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from uuid import UUID
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from enterprise_insight_backend.config import Settings, get_settings
 from enterprise_insight_backend.connectors import connector_for
 from enterprise_insight_backend.errors import DomainError
 from enterprise_insight_backend.evidence import EvidenceService
+from enterprise_insight_backend.model_profiles import LocalSecretVault
 from enterprise_insight_backend.models import (
     EntityRow,
     ImportPreviewRow,
@@ -57,10 +59,132 @@ from enterprise_insight_backend.schemas import (
 from enterprise_insight_backend.service_utils import json_ready, now_utc, require_revision
 from enterprise_insight_backend.transforms import validate_transform_expression
 
+SecretPath = tuple[str | int, ...]
+
+
+def _is_secret_field(name: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", name.casefold())
+    return (
+        any(marker in normalized for marker in ("password", "passwd", "secret"))
+        or normalized.endswith("token")
+        or normalized in {"authorization", "credential", "credentials"}
+        or any(
+            normalized.endswith(marker)
+            for marker in ("apikey", "accesskey", "privatekey")
+        )
+    )
+
+
+def _split_connection_profile(
+    profile: Mapping[str, object],
+) -> tuple[dict[str, object], dict[SecretPath, object], set[SecretPath]]:
+    secrets: dict[SecretPath, object] = {}
+    cleared: set[SecretPath] = set()
+
+    def visit(value: object, path: SecretPath) -> object:
+        if isinstance(value, Mapping):
+            cleaned: dict[str, object] = {}
+            for raw_key, child in value.items():
+                key = str(raw_key)
+                child_path = (*path, key)
+                if _is_secret_field(key):
+                    if child is None or child == "":
+                        cleared.add(child_path)
+                    else:
+                        secrets[child_path] = child
+                else:
+                    cleaned[key] = visit(child, child_path)
+            return cleaned
+        if isinstance(value, list):
+            return [visit(child, (*path, index)) for index, child in enumerate(value)]
+        return value
+
+    return visit(profile, ()), secrets, cleared  # type: ignore[return-value]
+
+
+def _merge_secret_values(
+    existing: dict[SecretPath, object],
+    updates: Mapping[SecretPath, object],
+    cleared: set[SecretPath],
+) -> dict[SecretPath, object]:
+    merged = dict(existing)
+    for path in cleared:
+        merged = {key: value for key, value in merged.items() if key[: len(path)] != path}
+    for path, value in updates.items():
+        merged = {
+            key: item
+            for key, item in merged.items()
+            if key[: len(path)] != path and path[: len(key)] != key
+        }
+        merged[path] = value
+    return merged
+
+
+def _apply_secret_values(
+    profile: dict[str, object], secrets: Mapping[SecretPath, object]
+) -> dict[str, object]:
+    result: object = json.loads(json.dumps(profile, ensure_ascii=False))
+    for path, value in secrets.items():
+        if not path:
+            continue
+        node = result
+        for index, part in enumerate(path[:-1]):
+            next_part = path[index + 1]
+            if isinstance(part, int):
+                if not isinstance(node, list):
+                    raise DomainError(
+                        "SOURCE_SECRET_PROFILE_INVALID",
+                        "数据源凭据配置无法读取。",
+                        status_code=409,
+                    )
+                while len(node) <= part:
+                    node.append([] if isinstance(next_part, int) else {})
+                if not isinstance(node[part], (dict, list)):
+                    node[part] = [] if isinstance(next_part, int) else {}
+                node = node[part]
+            else:
+                if not isinstance(node, dict):
+                    raise DomainError(
+                        "SOURCE_SECRET_PROFILE_INVALID",
+                        "数据源凭据配置无法读取。",
+                        status_code=409,
+                    )
+                if not isinstance(node.get(part), (dict, list)):
+                    node[part] = [] if isinstance(next_part, int) else {}
+                node = node[part]
+        last = path[-1]
+        if isinstance(last, int):
+            if not isinstance(node, list):
+                raise DomainError(
+                    "SOURCE_SECRET_PROFILE_INVALID",
+                    "数据源凭据配置无法读取。",
+                    status_code=409,
+                )
+            while len(node) <= last:
+                node.append(None)
+            node[last] = value
+        else:
+            if not isinstance(node, dict):
+                raise DomainError(
+                    "SOURCE_SECRET_PROFILE_INVALID",
+                    "数据源凭据配置无法读取。",
+                    status_code=409,
+                )
+            node[last] = value
+    if not isinstance(result, dict):
+        raise DomainError(
+            "SOURCE_SECRET_PROFILE_INVALID",
+            "数据源凭据配置无法读取。",
+            status_code=409,
+        )
+    return result
+
 
 class IntegrationService:
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, settings: Settings | None = None) -> None:
         self.session = session
+        self.settings = settings
+        self._secret_vault: LocalSecretVault | None = None
         self.portfolio = PortfolioService(session)
         self.ontology = OntologyService(session)
 
@@ -85,12 +209,14 @@ class IntegrationService:
                 status_code=422,
                 details=[{"kind": payload.kind.value}],
             )
+        profile, secrets, _ = _split_connection_profile(payload.connection_profile)
         row = SourceSystemRow(
             project_id=str(project_id),
             name=payload.name,
             kind=payload.kind.value,
             description=payload.description,
-            connection_profile=json_ready(payload.connection_profile),
+            connection_profile=json_ready(profile),
+            encrypted_connection_secrets=self._encrypt_secret_values(secrets),
         )
         self.session.add(row)
         self.session.flush()
@@ -109,7 +235,13 @@ class IntegrationService:
                     "连接配置必须是 JSON 对象。",
                     status_code=422,
                 )
-            row.connection_profile = json_ready(values.pop("connection_profile"))
+            existing_secrets = self._ensure_secret_values(row)
+            profile, secret_updates, cleared = _split_connection_profile(
+                values.pop("connection_profile")
+            )
+            merged_secrets = _merge_secret_values(existing_secrets, secret_updates, cleared)
+            row.connection_profile = json_ready(profile)
+            row.encrypted_connection_secrets = self._encrypt_secret_values(merged_secrets)
             row.status = "CONFIGURED"
             row.last_tested_at = None
         for key, value in values.items():
@@ -124,7 +256,7 @@ class IntegrationService:
             ok, message = True, "文件数据源配置有效。"
         else:
             try:
-                ok, message = connector_for(row.kind, row.connection_profile).test()
+                ok, message = connector_for(row.kind, self._resolved_profile(row)).test()
             except DomainError as exc:
                 ok, message = False, exc.message
         row.last_tested_at = now_utc()
@@ -146,7 +278,7 @@ class IntegrationService:
         payload: SourceConnectorExtractRequest,
     ) -> SourceConnectorExtractView:
         row = self.require_source(project_id, source_id)
-        page = connector_for(row.kind, row.connection_profile).extract(
+        page = connector_for(row.kind, self._resolved_profile(row)).extract(
             payload.asset_key,
             limit=payload.limit,
             watermark_column=payload.watermark_column,
@@ -849,6 +981,11 @@ class IntegrationService:
             raise DomainError("SOURCE_SYSTEM_NOT_FOUND", "数据源不存在。", status_code=404)
         return row
 
+    def connector_profile(self, project_id: UUID, source_id: UUID) -> dict[str, object]:
+        """Return a decrypted profile for trusted in-process connector execution only."""
+        row = self.require_source(project_id, source_id)
+        return self._resolved_profile(row)
+
     def require_asset(
         self, project_id: UUID, source_id: UUID, asset_id: UUID
     ) -> SourceAssetRow:
@@ -895,8 +1032,88 @@ class IntegrationService:
         self.session.flush()
         return row
 
-    @staticmethod
-    def _source_view(row: SourceSystemRow) -> SourceSystemView:
+    def _vault(self, *, require_existing: bool = False) -> LocalSecretVault:
+        if self._secret_vault is not None:
+            return self._secret_vault
+        settings = self.settings or get_settings()
+        key_path = settings.data_dir / "model-profile.key"
+        if require_existing and not key_path.is_file():
+            raise DomainError(
+                "SOURCE_SECRET_KEY_MISSING",
+                "本机数据源凭据密钥文件缺失，请恢复 model-profile.key 后重试。",
+                status_code=409,
+            )
+        try:
+            self._secret_vault = LocalSecretVault(settings)
+        except (OSError, ValueError) as exc:
+            raise DomainError(
+                "SOURCE_SECRET_KEY_UNREADABLE",
+                "本机数据源凭据密钥无法读取。",
+                status_code=409,
+            ) from exc
+        return self._secret_vault
+
+    def _encrypt_secret_values(self, values: Mapping[SecretPath, object]) -> str | None:
+        if not values:
+            return None
+        payload = [
+            {"path": list(path), "value": value}
+            for path, value in sorted(values.items(), key=lambda item: repr(item[0]))
+        ]
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return self._vault().encrypt(serialized)
+
+    def _decrypt_secret_values(self, encrypted: str) -> dict[SecretPath, object]:
+        try:
+            decoded = json.loads(self._vault(require_existing=True).decrypt(encrypted))
+            if not isinstance(decoded, list):
+                raise ValueError("invalid secret payload")
+            values: dict[SecretPath, object] = {}
+            for item in decoded:
+                if not isinstance(item, dict) or not isinstance(item.get("path"), list):
+                    raise ValueError("invalid secret entry")
+                path_parts = item["path"]
+                if not path_parts or any(type(part) not in (str, int) for part in path_parts):
+                    raise ValueError("invalid secret path")
+                values[tuple(path_parts)] = item["value"]
+            return values
+        except (DomainError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise DomainError(
+                "SOURCE_SECRET_KEY_UNREADABLE",
+                "本机数据源凭据无法解密，请恢复正确的 model-profile.key。",
+                status_code=409,
+            ) from exc
+
+    def _ensure_secret_values(self, row: SourceSystemRow) -> dict[SecretPath, object]:
+        if not isinstance(row.connection_profile, Mapping):
+            raise DomainError(
+                "SOURCE_CONNECTION_PROFILE_INVALID",
+                "数据源连接配置无法读取。",
+                status_code=409,
+            )
+        secrets = (
+            self._decrypt_secret_values(row.encrypted_connection_secrets)
+            if row.encrypted_connection_secrets
+            else {}
+        )
+        cleaned, legacy_secrets, cleared = _split_connection_profile(row.connection_profile)
+        combined = _merge_secret_values(secrets, legacy_secrets, cleared)
+        if (
+            cleaned != row.connection_profile
+            or legacy_secrets
+            or cleared
+        ):
+            row.connection_profile = json_ready(cleaned)
+            row.encrypted_connection_secrets = self._encrypt_secret_values(combined)
+            self.session.flush()
+        return combined
+
+    def _resolved_profile(self, row: SourceSystemRow) -> dict[str, object]:
+        secrets = self._ensure_secret_values(row)
+        return _apply_secret_values(row.connection_profile, secrets)
+
+    def _source_view(self, row: SourceSystemRow) -> SourceSystemView:
+        profile = self._resolved_profile(row)
         return SourceSystemView.model_validate(
             {
                 "id": row.id,
@@ -904,7 +1121,7 @@ class IntegrationService:
                 "name": row.name,
                 "kind": row.kind,
                 "description": row.description,
-                "configured_fields": sorted(row.connection_profile),
+                "configured_fields": sorted(profile),
                 "status": row.status,
                 "last_tested_at": row.last_tested_at,
                 "revision": row.revision,

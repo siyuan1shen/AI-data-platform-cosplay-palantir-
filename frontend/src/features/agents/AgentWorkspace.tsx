@@ -6,7 +6,7 @@ import type { AgentKind, AgentRun, AgentThread } from "../../api/types";
 import { StatusMessage } from "../../components/StatusMessage";
 import { ActionCenter } from "../actions/ActionCenter";
 
-const agentLabels: Record<AgentKind, string> = { PROJECTION: "企业投影 Agent", MANAGEMENT: "管理决策 Agent", SYSTEM_ONTOLOGY: "系统本体 Agent" };
+const agentLabels: Record<AgentKind, string> = { PROJECTION: "企业投影 Agent", MANAGEMENT_INPUT: "管理信息输入", MANAGEMENT: "管理决策 Agent", SYSTEM_ONTOLOGY: "系统本体 Agent" };
 const runningStatuses = new Set(["QUEUED", "RETRIEVING", "PLANNING", "RUNNING_TOOLS", "PRODUCING_PROPOSAL", "VALIDATING"]);
 const runStatusLabels: Record<AgentRun["status"], string> = {
   QUEUED: "等待处理",

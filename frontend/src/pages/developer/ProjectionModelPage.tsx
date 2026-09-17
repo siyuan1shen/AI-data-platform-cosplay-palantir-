@@ -16,7 +16,7 @@ const viewpointOptions: Array<{ value: Viewpoint; label: string }> = [{ value: "
 
 export function ProjectionModelPage() {
   const workspace = useWorkspace();
-  if (!workspace.selectedProjectId) return <StatusMessage title="请先选择项目" description="在“公司与项目”中选择项目后，再维护企业投影。" />;
+  if (!workspace.selectedProjectId) return <StatusMessage title="请先选择公司" description="在“企业”中选择公司，系统会自动打开它的统一企业投影。" />;
   return <ProjectionModel key={workspace.selectedProjectId} projectId={workspace.selectedProjectId} refreshWorkspace={workspace.refresh} />;
 }
 

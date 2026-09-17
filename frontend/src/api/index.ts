@@ -46,12 +46,30 @@ import type {
   LearningCaseDraftFromScenarioCreate,
   LearningCaseUpdate,
   ManagementAnalysisRun,
+  ManagementAction,
+  ManagementActionCreate,
+  ManagementActionUpdate,
+  ManagementActionRevisionRequest,
+  ManagementActionEventCreate,
+  ManagementActionVerifyDone,
+  ManagementActionEvent,
   ManagementInsight,
   ManagementInsightUpdate,
   ManagementIssue,
   ManagementIssueFeedback,
   ManagementIssueReopen,
   ManagementSignal,
+  ManagementObservationKind,
+  ObservationCreate,
+  ObservationUpdate,
+  ObservationView,
+  ObservationHistoryView,
+  ObservationExtractRequest,
+  ObservationExtractionView,
+  ObservationExtractionHistoryView,
+  ObservationAttachment,
+  ObservationIngestion,
+  ObservationIngestionRequest,
   MaterializationRun,
   MetricDefinition,
   MetricDefinitionCreate,
@@ -94,6 +112,9 @@ import type {
   ScenarioCreate,
   ScenarioDiff,
   ScenarioRevisionRequest,
+  ScenarioRun,
+  ScenarioRunComparison,
+  ScenarioSimulationRequest,
   ScenarioUpdate,
   SemanticMapping,
   SemanticMappingCommand,
@@ -135,6 +156,22 @@ import type {
   Page,
   Project,
   ProjectCreate,
+  PotentialRecord,
+  PotentialRecordCreate,
+  PotentialRecordUpdate,
+  PotentialRecordStatusRequest,
+  PotentialHistory,
+  PotentialPage,
+  WorkObservationBatch,
+  WorkObservationAnalysis,
+  WorkObservationComparison,
+  WorkObservationCoverage,
+  WorkObservationImportResult,
+  WorkObservationIdentityBinding,
+  WorkObservationIdentityBindingHistory,
+  WorkObservationPackage,
+  WorkObservationPreview,
+  WorkObservationVirtualCandidate,
 } from "./types";
 
 const realApi = {
@@ -144,10 +181,70 @@ const realApi = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  listProjects: (companyId?: string) =>
+  listProjects: (companyId?: string, ensureWorkspace = false) =>
     request<Page<Project>>(
-      `/api/v3/projects${companyId ? `?company_id=${encodeURIComponent(companyId)}` : ""}`,
+      `/api/v3/projects${companyId ? `?company_id=${encodeURIComponent(companyId)}${ensureWorkspace ? "&ensure_workspace=true" : ""}` : ""}`,
     ),
+  listManagementObservations: (projectId: string, includeWithdrawn = false) =>
+    request<Page<ObservationView>>(`/api/v3/projects/${encodeURIComponent(projectId)}/observations${includeWithdrawn ? "?include_withdrawn=true" : ""}`),
+  listManagementActions: (projectId: string, includeCancelled = true) =>
+    request<Page<ManagementAction>>(`/api/v3/projects/${encodeURIComponent(projectId)}/management/actions?include_cancelled=${includeCancelled}&limit=100&offset=0`),
+  createManagementAction: (projectId: string, input: ManagementActionCreate) =>
+    request<ManagementAction>(`/api/v3/projects/${encodeURIComponent(projectId)}/management/actions`, { method: "POST", body: JSON.stringify(input) }),
+  getManagementAction: (projectId: string, actionId: string) =>
+    request<ManagementAction>(`/api/v3/projects/${encodeURIComponent(projectId)}/management/actions/${encodeURIComponent(actionId)}`),
+  updateManagementAction: (projectId: string, actionId: string, input: ManagementActionUpdate) =>
+    request<ManagementAction>(`/api/v3/projects/${encodeURIComponent(projectId)}/management/actions/${encodeURIComponent(actionId)}`, { method: "PATCH", body: JSON.stringify(input) }),
+  cancelManagementAction: (projectId: string, actionId: string, input: ManagementActionRevisionRequest) =>
+    request<ManagementAction>(`/api/v3/projects/${encodeURIComponent(projectId)}/management/actions/${encodeURIComponent(actionId)}/cancel`, { method: "POST", body: JSON.stringify(input) }),
+  appendManagementActionProgress: (projectId: string, actionId: string, input: ManagementActionEventCreate) =>
+    request<ManagementActionEvent>(`/api/v3/projects/${encodeURIComponent(projectId)}/management/actions/${encodeURIComponent(actionId)}/progress`, { method: "POST", body: JSON.stringify(input) }),
+  appendManagementActionOutcome: (projectId: string, actionId: string, input: ManagementActionEventCreate) =>
+    request<ManagementActionEvent>(`/api/v3/projects/${encodeURIComponent(projectId)}/management/actions/${encodeURIComponent(actionId)}/outcomes`, { method: "POST", body: JSON.stringify(input) }),
+  reportManagementActionDone: (projectId: string, actionId: string, input: ManagementActionEventCreate) =>
+    request<ManagementAction>(`/api/v3/projects/${encodeURIComponent(projectId)}/management/actions/${encodeURIComponent(actionId)}/report-done`, { method: "POST", body: JSON.stringify(input) }),
+  verifyManagementActionDone: (projectId: string, actionId: string, input: ManagementActionVerifyDone) =>
+    request<ManagementAction>(`/api/v3/projects/${encodeURIComponent(projectId)}/management/actions/${encodeURIComponent(actionId)}/verify-done`, { method: "POST", body: JSON.stringify(input) }),
+  getManagementActionHistory: (projectId: string, actionId: string) =>
+    request<Page<ManagementActionEvent>>(`/api/v3/projects/${encodeURIComponent(projectId)}/management/actions/${encodeURIComponent(actionId)}/history?offset=0&limit=100`),
+  ingestManagementObservation: (projectId: string, input: ObservationIngestionRequest) => {
+    const body = new FormData();
+    body.append("file", input.file, input.file.name);
+    body.append("observation_kind", input.observation_kind);
+    if (input.title?.trim()) body.append("title", input.title.trim());
+    if (input.occurred_at) body.append("occurred_at", input.occurred_at);
+    return request<ObservationIngestion>(`/api/v3/projects/${encodeURIComponent(projectId)}/observation-ingestions`, { method: "POST", body });
+  },
+  listManagementObservationAttachments: (projectId: string, observationId: string) =>
+    request<Page<ObservationAttachment>>(`/api/v3/projects/${encodeURIComponent(projectId)}/observations/${encodeURIComponent(observationId)}/attachments`),
+  downloadManagementObservationAttachment: (projectId: string, observationId: string, attachmentId: string) =>
+    download(`/api/v3/projects/${encodeURIComponent(projectId)}/observations/${encodeURIComponent(observationId)}/attachments/${encodeURIComponent(attachmentId)}`),
+  listPotentialRecords: (projectId: string, includeHistory = false) =>
+    request<PotentialPage>(`/api/v3/projects/${encodeURIComponent(projectId)}/potential-records?include_history=${includeHistory}`),
+  createPotentialRecord: (projectId: string, input: PotentialRecordCreate) =>
+    request<PotentialRecord>(`/api/v3/projects/${encodeURIComponent(projectId)}/potential-records`, { method: "POST", body: JSON.stringify(input) }),
+  editPotentialRecord: (projectId: string, recordId: string, input: PotentialRecordUpdate) =>
+    request<PotentialRecord>(`/api/v3/projects/${encodeURIComponent(projectId)}/potential-records/${encodeURIComponent(recordId)}`, { method: "PATCH", body: JSON.stringify(input) }),
+  getPotentialRecordHistory: (projectId: string, recordId: string) =>
+    request<PotentialHistory>(`/api/v3/projects/${encodeURIComponent(projectId)}/potential-records/${encodeURIComponent(recordId)}/history`),
+  acceptPotentialRecord: (projectId: string, recordId: string, input: PotentialRecordStatusRequest) =>
+    request<PotentialRecord>(`/api/v3/projects/${encodeURIComponent(projectId)}/potential-records/${encodeURIComponent(recordId)}/accept`, { method: "POST", body: JSON.stringify(input) }),
+  rejectPotentialRecord: (projectId: string, recordId: string, input: PotentialRecordStatusRequest) =>
+    request<PotentialRecord>(`/api/v3/projects/${encodeURIComponent(projectId)}/potential-records/${encodeURIComponent(recordId)}/reject`, { method: "POST", body: JSON.stringify(input) }),
+  withdrawPotentialRecord: (projectId: string, recordId: string, input: PotentialRecordStatusRequest) =>
+    request<PotentialRecord>(`/api/v3/projects/${encodeURIComponent(projectId)}/potential-records/${encodeURIComponent(recordId)}/withdraw`, { method: "POST", body: JSON.stringify(input) }),
+  createManagementObservation: (projectId: string, input: ObservationCreate) =>
+    request<ObservationView>(`/api/v3/projects/${encodeURIComponent(projectId)}/observations`, { method: "POST", body: JSON.stringify(input) }),
+  reviseManagementObservation: (projectId: string, observationId: string, input: ObservationUpdate) =>
+    request<ObservationView>(`/api/v3/projects/${encodeURIComponent(projectId)}/observations/${encodeURIComponent(observationId)}`, { method: "PATCH", body: JSON.stringify(input) }),
+  withdrawManagementObservation: (projectId: string, observationId: string, expectedRevision: number) =>
+    request<ObservationView>(`/api/v3/projects/${encodeURIComponent(projectId)}/observations/${encodeURIComponent(observationId)}?expected_revision=${expectedRevision}`, { method: "DELETE" }),
+  getManagementObservationHistory: (projectId: string, observationId: string) =>
+    request<ObservationHistoryView>(`/api/v3/projects/${encodeURIComponent(projectId)}/observations/${encodeURIComponent(observationId)}/history`),
+  extractManagementObservation: (projectId: string, observationId: string, input: ObservationExtractRequest) =>
+    request<ObservationExtractionView>(`/api/v3/projects/${encodeURIComponent(projectId)}/observations/${encodeURIComponent(observationId)}/extract`, { method: "POST", body: JSON.stringify(input) }),
+  listManagementObservationExtractions: (projectId: string, observationId: string) =>
+    request<ObservationExtractionHistoryView>(`/api/v3/projects/${encodeURIComponent(projectId)}/observations/${encodeURIComponent(observationId)}/extractions`),
   createProject: (companyId: string, input: ProjectCreate) =>
     request<Project>(`/api/v3/companies/${encodeURIComponent(companyId)}/projects`, {
       method: "POST",
@@ -156,6 +253,106 @@ const realApi = {
   getExecutiveContext: (projectId: string, preview: boolean) =>
     request<ExecutiveContext>(
       `/api/v3/projects/${encodeURIComponent(projectId)}/executive/context?preview=${preview}`,
+    ),
+  getWorkObservationCoverage: (projectId: string) =>
+    request<WorkObservationCoverage>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/coverage`,
+    ),
+  ingestWorkObservationBatch: (projectId: string, input: WorkObservationPackage) =>
+    request<WorkObservationImportResult>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/batches`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  listWorkObservationBatches: (projectId: string, offset = 0, limit = 100) =>
+    request<Page<WorkObservationBatch>>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/batches?offset=${offset}&limit=${limit}`,
+    ),
+  previewWorkObservationImport: (projectId: string, input: WorkObservationPackage) =>
+    request<WorkObservationPreview>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/imports/preview`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  confirmWorkObservationImport: (projectId: string, previewId: string, payloadHash: string) =>
+    request<WorkObservationImportResult>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/imports/confirm`,
+      { method: "POST", body: JSON.stringify({ preview_id: previewId, payload_hash: payloadHash }) },
+    ),
+  listWorkObservationIdentityBindings: (projectId: string, offset = 0, limit = 100) =>
+    request<Page<WorkObservationIdentityBinding>>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/identity-bindings?offset=${offset}&limit=${limit}`,
+    ),
+  bindWorkObservationIdentity: (
+    projectId: string,
+    input: {
+      source_id: string;
+      source_employee_key: string;
+      formal_entity_id: string;
+      formal_role_key?: string | null;
+    },
+  ) =>
+    request<WorkObservationIdentityBinding>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/identity-bindings`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  retireWorkObservationIdentity: (projectId: string, input: { source_id: string; source_employee_key: string; reason: string }) =>
+    request<WorkObservationIdentityBinding>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/identity-bindings/retire`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  listWorkObservationIdentityHistory: (projectId: string, sourceId?: string, sourceEmployeeKey?: string) => {
+    const params = new URLSearchParams();
+    if (sourceId) params.set("source_id", sourceId);
+    if (sourceEmployeeKey) params.set("source_employee_key", sourceEmployeeKey);
+    return request<Page<WorkObservationIdentityBindingHistory>>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/identity-bindings/history${params.toString() ? `?${params.toString()}` : ""}`,
+    );
+  },
+  createWorkObservationAnalysis: (projectId: string, input: Record<string, unknown> = {}) =>
+    request<WorkObservationAnalysis>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/analyses`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  listWorkObservationAnalyses: (projectId: string, offset = 0, limit = 50) =>
+    request<Page<WorkObservationAnalysis>>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/analyses?offset=${offset}&limit=${limit}`,
+    ),
+  getWorkObservationAnalysis: (projectId: string, analysisId: string) =>
+    request<WorkObservationAnalysis>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/analyses/${encodeURIComponent(analysisId)}`,
+    ),
+  proposeWorkObservationVirtualCandidates: (projectId: string, analysisId: string, input: { role_key?: string | null; min_count?: number } = {}) =>
+    request<WorkObservationVirtualCandidate[]>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/analyses/${encodeURIComponent(analysisId)}/virtual-candidates`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  listWorkObservationVirtualCandidates: (projectId: string, status?: string) =>
+    request<Page<WorkObservationVirtualCandidate>>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/virtual-candidates${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ),
+  decideWorkObservationVirtualCandidate: (
+    projectId: string,
+    candidateId: string,
+    input: { decision: "CONFIRM" | "REJECT"; reason: string; virtual_work_model_id?: string | null; position_node_id?: string | null },
+  ) =>
+    request<WorkObservationVirtualCandidate>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/virtual-candidates/${encodeURIComponent(candidateId)}/decision`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  getWorkObservationGraph: (projectId: string, analysisId?: string) =>
+    request<{ analysis_id: string | null; graph: Record<string, unknown> | null }>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/graphs${analysisId ? `?analysis_id=${encodeURIComponent(analysisId)}` : ""}`,
+    ),
+  getWorkObservationSegment: (projectId: string, analysisId: string, segmentId: string) =>
+    request<Record<string, unknown>>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/segments/${encodeURIComponent(segmentId)}?analysis_id=${encodeURIComponent(analysisId)}`,
+    ),
+  compareWorkObservation: (
+    projectId: string,
+    input: { analysis_id: string; left_employee_keys: string[]; right_employee_keys: string[] },
+  ) =>
+    request<WorkObservationComparison>(
+      `/api/v3/projects/${encodeURIComponent(projectId)}/work-observation/comparisons`,
+      { method: "POST", body: JSON.stringify(input) },
     ),
   queryGraph: (projectId: string, input: GraphQuery) =>
     request<Graph>(`/api/v3/projects/${encodeURIComponent(projectId)}/graph/query`, {
@@ -331,6 +528,9 @@ const realApi = {
   compareScenarios: (projectId: string, input: ScenarioCompareRequest) => request<ScenarioComparison>(`/api/v3/projects/${encodeURIComponent(projectId)}/scenario-comparisons`, { method: "POST", body: JSON.stringify(input) }),
   rebaseScenario: (projectId: string, scenarioId: string, input: ScenarioRevisionRequest) => request<Scenario>(`/api/v3/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/rebase`, { method: "POST", body: JSON.stringify(input) }),
   applyScenario: (projectId: string, scenarioId: string, input: ScenarioRevisionRequest) => request<Scenario>(`/api/v3/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/apply`, { method: "POST", body: JSON.stringify(input) }),
+  listScenarioRuns: (projectId: string, scenarioId: string) => request<Page<ScenarioRun>>(`/api/v3/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/runs`),
+  runScenario: (projectId: string, scenarioId: string, input: ScenarioSimulationRequest) => request<ScenarioRun>(`/api/v3/projects/${encodeURIComponent(projectId)}/scenarios/${encodeURIComponent(scenarioId)}/runs`, { method: "POST", body: JSON.stringify(input) }),
+  compareScenarioRuns: (projectId: string, input: { left_run_id: string; right_run_id: string }) => request<ScenarioRunComparison>(`/api/v3/projects/${encodeURIComponent(projectId)}/scenario-run-comparisons`, { method: "POST", body: JSON.stringify(input) }),
   listExports: (projectId: string) => request<Page<ExportJob>>(`/api/v3/projects/${encodeURIComponent(projectId)}/exports`),
   createExport: (projectId: string, input: ExportRequest) => request<ExportJob>(`/api/v3/projects/${encodeURIComponent(projectId)}/exports`, { method: "POST", body: JSON.stringify(input) }),
   getExport: (projectId: string, exportId: string) => request<ExportJob>(`/api/v3/projects/${encodeURIComponent(projectId)}/exports/${encodeURIComponent(exportId)}`),

@@ -13,6 +13,8 @@ import { StatusMessage } from "../../components/StatusMessage";
 import { ActionCenter } from "../../features/actions/ActionCenter";
 import { useWorkspace } from "../../workspace/WorkspaceContext";
 import { PublishedProjectGate } from "./PublishedProjectGate";
+import { PotentialRecordsPanel } from "./PotentialRecordsPanel";
+import { ManagementActionsPanel } from "./ManagementActionsPanel";
 
 const ProjectionGraphModule = lazy(async () => ({ default: (await import("../../features/projection/ProjectionGraph")).ProjectionGraph }));
 
@@ -23,12 +25,12 @@ function ProjectionGraph(props: ComponentProps<typeof ProjectionGraphModule>) {
 export function DecisionLifecyclePage() {
   const workspace = useWorkspace();
   if (!workspace.selectedProjectId) {
-    return <StatusMessage title="请先选择企业项目" description="选择项目后才能查看假设、方案与行动。" />;
+    return <StatusMessage title="请先选择企业" description="选择公司后才能查看该企业的假设、方案与行动。" />;
   }
-  return <PublishedProjectGate projectId={workspace.selectedProjectId}><DecisionWorkspace key={workspace.selectedProjectId} projectId={workspace.selectedProjectId} /></PublishedProjectGate>;
+  return <PublishedProjectGate projectId={workspace.selectedProjectId}><DecisionWorkspace key={workspace.selectedProjectId} projectId={workspace.selectedProjectId} companyId={workspace.selectedCompanyId} /></PublishedProjectGate>;
 }
 
-function DecisionWorkspace({ projectId }: { projectId: string }) {
+function DecisionWorkspace({ projectId, companyId }: { projectId: string; companyId: string }) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState("");
   const [error, setError] = useState<Error | null>(null);
@@ -119,8 +121,10 @@ function DecisionWorkspace({ projectId }: { projectId: string }) {
       <HypothesisPanel items={hypothesesQuery.data?.items ?? []} pending={hypothesisMutation.isPending || feedbackMutation.isPending} onFeedback={feedback} onCreate={createHypothesis} />
       <ScenarioPanel items={scenariosQuery.data?.items ?? []} selectedId={selectedScenarioId} pending={scenarioMutation.isPending || statusMutation.isPending || applyMutation.isPending} onSelect={setSelectedScenarioId} onStatus={(item, status) => statusMutation.mutate({ item, status })} onApply={(item) => applyMutation.mutate(item)} onCreate={createScenario} />
     </div>
+    <PotentialRecordsPanel projectId={projectId} companyId={companyId} />
     {selectedScenario && <section className="panel"><div className="panel-heading"><div><h2>方案预览：{selectedScenario.name}</h2><p>基准修订 {selectedScenario.base_revision}；应用前与正式投影完全隔离。</p></div>{diffQuery.data?.rebase_required && selectedScenario.status !== "ACTIVE" ? <button className="button secondary" disabled={rebaseMutation.isPending} onClick={() => rebaseMutation.mutate(selectedScenario)}>无冲突时重基</button> : <span className="status-pill">{selectedScenario.status}</span>}</div>{diffQuery.data && <div className="summary-strip"><article><span>新建</span><strong>{diffQuery.data.creates.length}</strong></article><article><span>修改</span><strong>{diffQuery.data.updates.length}</strong></article><article><span>退役</span><strong>{diffQuery.data.retires.length}</strong></article><article><span>冲突</span><strong>{diffQuery.data.conflicts.length}</strong></article></div>}{diffQuery.data?.conflicts.length ? <pre className="error-box">{JSON.stringify(diffQuery.data.conflicts, null, 2)}</pre> : null}{graphQuery.data ? <ProjectionGraph graph={graphQuery.data} search="" onSelect={() => undefined} /> : <p className="empty-copy">正在生成方案图……</p>}</section>}
     <ScenarioComparePanel scenarios={scenariosQuery.data?.items ?? []} left={compareLeft} right={compareRight} comparison={comparison} pending={compareMutation.isPending} onLeft={setCompareLeft} onRight={setCompareRight} onCompare={() => compareMutation.mutate()} />
+    <ManagementActionsPanel projectId={projectId} />
     <ActionCenter projectId={projectId} />
   </div>;
 }

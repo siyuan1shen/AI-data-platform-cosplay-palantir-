@@ -1,0 +1,13 @@
+{
+  "source_id": "device-001",
+  "employee_key": "employee-001",
+  "project_id": "替换为项目 UUID",
+  "role_key": "sales",
+  "upload_url": "http://127.0.0.1:8012/api/v3/ingestion/work-observation/batches",
+  "cache_dir": "./cache",
+  "poll_seconds": 5,
+  "idle_after_seconds": 300,
+  "retry_seconds": 30,
+  "log_file": "./cache/collector.log",
+  "headers": {}
+}

@@ -259,6 +259,10 @@ def test_bundle_restores_a_complete_project_without_secrets_or_partial_writes(
             restore_text = archive.read("restore.json").decode("utf-8")
             assert "top-secret" not in restore_text
             assert "secret.internal" not in restore_text
+            restore_payload = json.loads(restore_text)
+            archived_source = restore_payload["tables"]["source_systems"][0]
+            assert archived_source["connection_profile"] == {}
+            assert archived_source["encrypted_connection_secrets"] is None
 
     with _client(target_path) as target:
         preview = target.post(

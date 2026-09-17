@@ -78,16 +78,57 @@ function Wait-HttpOk {
 }
 
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
-    $SystemPython = Get-Command "python.exe" -ErrorAction SilentlyContinue
-    if ($null -eq $SystemPython) {
-        throw "Python 3.12 was not found."
+    # Do not trust the first python.exe on PATH.  Windows machines often have
+    # several Python versions installed, while this backend intentionally uses
+    # the version declared by the project.  The py launcher can resolve the
+    # requested interpreter even when python.exe points at a newer version.
+    $PythonBootstrap = $null
+    $PythonLauncher = Get-Command "py.exe" -ErrorAction SilentlyContinue
+    if ($null -ne $PythonLauncher) {
+        try {
+            $candidate = (& $PythonLauncher.Source -3.12 -c 'import sys; print(sys.executable)').Trim()
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+                $PythonBootstrap = $candidate
+            }
+        }
+        catch {
+            $PythonBootstrap = $null
+        }
     }
-    $SystemPythonPath = $SystemPython.Source
-    $version = & $SystemPythonPath -c 'import sys; print(sys.version_info.major, sys.version_info.minor, sep=chr(46))'
-    if ($LASTEXITCODE -ne 0 -or $version.Trim() -ne "3.12") {
-        throw "Python 3.12 is required. Current version: $version"
+    if ($null -eq $PythonBootstrap) {
+        $PythonUserRoot = $env:LOCALAPPDATA
+        if ([string]::IsNullOrWhiteSpace($PythonUserRoot)) {
+            $PythonUserRoot = [Environment]::GetFolderPath("LocalApplicationData")
+        }
+        if ([string]::IsNullOrWhiteSpace($PythonUserRoot)) {
+            $PythonUserRoot = $ProjectRoot
+        }
+        $PythonCandidates = @(
+            (Join-Path $PythonUserRoot "Programs\Python\Python312\python.exe"),
+            "C:\Program Files\Python312\python.exe",
+            "C:\Python312\python.exe"
+        )
+        foreach ($candidate in $PythonCandidates) {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                $PythonBootstrap = $candidate
+                break
+            }
+        }
     }
-    & $SystemPythonPath -m venv (Join-Path $BackendRoot ".venv")
+    if ($null -eq $PythonBootstrap) {
+        $SystemPython = Get-Command "python.exe" -ErrorAction SilentlyContinue
+        if ($null -ne $SystemPython) {
+            $version = & $SystemPython.Source -c 'import sys; print(sys.version_info.major, sys.version_info.minor, sep=chr(46))'
+            if ($LASTEXITCODE -eq 0 -and $version.Trim() -eq "3.12") {
+                $PythonBootstrap = $SystemPython.Source
+            } else {
+                throw "Python 3.12 is required. Current version: $version"
+            }
+        } else {
+            throw "Python 3.12 was not found. Please install Python 3.12 or add the Python launcher to PATH."
+        }
+    }
+    & $PythonBootstrap -m venv (Join-Path $BackendRoot ".venv")
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to create the backend virtual environment."
     }
@@ -125,9 +166,13 @@ if ($RefreshDependencies -or -not (Test-Path -LiteralPath (Join-Path $FrontendRo
     }
 }
 
-& $Python (Join-Path $BackendRoot "scripts\export_openapi.py")
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to refresh the OpenAPI contract."
+# The checked-in contract is the runtime/client boundary.  Refreshing it is a
+# developer/CI task, not a prerequisite for starting a local instance; this
+# keeps a normal desktop launch from failing because an editor or antivirus
+# temporarily holds the generated artifact open.
+$ContractPath = Join-Path $ProjectRoot "contracts\openapi.json"
+if (-not (Test-Path -LiteralPath $ContractPath -PathType Leaf)) {
+    throw "OpenAPI contract is missing: $ContractPath"
 }
 Push-Location $FrontendRoot
 try {

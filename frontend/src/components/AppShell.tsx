@@ -18,14 +18,14 @@ export function AppShell({ surface, children }: AppShellProps) {
   const workspace = useWorkspace();
   const isPreview = new URLSearchParams(location.search).get("preview") === "true";
   const requestedProjectId = new URLSearchParams(location.search).get("project") ?? "";
-  const requestedProjectKnown = workspace.projects.some((project) => project.id === requestedProjectId);
+  const requestedProjectKnown = workspace.projects.some((project) => project.id === requestedProjectId && project.is_primary);
   const allProjectsQuery = useQuery({
     queryKey: ["all-projects-for-deep-link"],
     queryFn: () => api.listProjects(),
     enabled: Boolean(requestedProjectId) && !requestedProjectKnown,
   });
-  const deepLinkedProject = workspace.projects.find((project) => project.id === requestedProjectId)
-    ?? allProjectsQuery.data?.items.find((project) => project.id === requestedProjectId);
+  const deepLinkedProject = workspace.projects.find((project) => project.id === requestedProjectId && project.is_primary)
+    ?? allProjectsQuery.data?.items.find((project) => project.id === requestedProjectId && project.is_primary);
   const deepLinkError = Boolean(
     requestedProjectId
       && allProjectsQuery.isFetched
@@ -44,8 +44,10 @@ export function AppShell({ surface, children }: AppShellProps) {
 
   const syncProjectUrl = (projectId: string) => {
     const params = new URLSearchParams(location.search);
-    if (surface === "executive" && projectId) params.set("project", projectId);
-    else params.delete("project");
+    // Company is the user-facing scope. The canonical projection key is an
+    // implementation detail and must not create a second project selector.
+    void projectId;
+    params.delete("project");
     navigate(`${location.pathname}${params.size ? `?${params}` : ""}`, { replace: true });
   };
 
@@ -61,9 +63,7 @@ export function AppShell({ surface, children }: AppShellProps) {
 
   const switchSurface = (next: Surface) => {
     if (next === "executive") {
-      const params = new URLSearchParams();
-      if (workspace.selectedProjectId) params.set("project", workspace.selectedProjectId);
-      navigate(`/executive${params.size ? `?${params}` : ""}`);
+      navigate("/executive");
       return;
     }
     navigate("/developer");
@@ -77,7 +77,7 @@ export function AppShell({ surface, children }: AppShellProps) {
           <span><strong>企业数字投影</strong><small>Enterprise Insight</small></span>
         </div>
 
-        <div className="workspace-selectors" aria-label="当前企业和项目">
+        <div className="workspace-selectors" aria-label="当前企业投影">
           <label>
             <span>公司</span>
             <select
@@ -91,19 +91,10 @@ export function AppShell({ surface, children }: AppShellProps) {
               ))}
             </select>
           </label>
-          <label>
-            <span>项目</span>
-            <select
-              value={workspace.selectedProjectId}
-              onChange={(event) => selectProject(event.target.value)}
-              disabled={!workspace.projects.length}
-            >
-              {!workspace.projects.length && <option value="">暂无项目</option>}
-              {workspace.projects.map((project) => (
-                <option key={project.id} value={project.id}>{project.name}</option>
-              ))}
-            </select>
-          </label>
+          <div className="projection-scope-label" aria-label="企业统一投影">
+            <span>统一企业投影</span>
+            <strong>{workspace.selectedCompany?.name ?? "正在建立企业空间"}</strong>
+          </div>
         </div>
 
         <div className="surface-switch" aria-label="界面切换">
@@ -124,23 +115,21 @@ export function AppShell({ surface, children }: AppShellProps) {
           <nav>
             {surface === "developer" ? (
               <>
-                <NavLink to="/developer" end>公司与项目</NavLink>
-                <NavLink to="/developer/build">Agent 建模工作台</NavLink>
-                <NavLink to="/developer/model">企业投影</NavLink>
-                <NavLink to="/developer/advanced">高级工具</NavLink>
+                <NavLink to="/developer" end>企业</NavLink>
+                <NavLink to="/developer/build">材料与企业建模</NavLink>
+                <NavLink to="/developer/advanced">信息系统接入</NavLink>
               </>
             ) : (
               <>
                 <NavLink to={`/executive${location.search}`} end>企业数字投影</NavLink>
                 <NavLink to={`/executive/agent${location.search}`}>管理 Agent</NavLink>
-                <NavLink to={`/executive/decisions${location.search}`}>结果与确认</NavLink>
               </>
             )}
           </nav>
           <div className="migration-progress">
             <span>推荐顺序</span>
-            <strong>{surface === "developer" ? "材料 → Agent → 投影 → 审核" : "投影 → 询问 → 确认"}</strong>
-            <small>低频系统功能已集中到高级工具。</small>
+            <strong>{surface === "developer" ? "材料 → 建模 → 接入" : "投影 → 询问"}</strong>
+            <small>{surface === "developer" ? "系统接入和冲突处理在接入流程内完成。" : "来源、证据和确认收纳在管理 Agent 对话中。"}</small>
           </div>
           <div className="connection-state">
             <i />
@@ -151,8 +140,8 @@ export function AppShell({ surface, children }: AppShellProps) {
           {deepLinkError ? (
             <StatusMessage
               tone="danger"
-              title="项目链接无效或无权访问"
-              description="当前链接中的项目不存在，或不属于可访问的企业。请从顶部重新选择公司和项目。"
+              title="企业投影链接无效或无权访问"
+              description="当前链接中的企业投影不存在，或不属于可访问的公司。请从顶部重新选择公司。"
             />
           ) : children}
         </main>
